@@ -1,0 +1,17 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "plugagent-marketplace",
+  "owner": { "name": "PlugAgent" },
+  "metadata": {
+    "description": "PlugAgent — plugin-form personal agent for Claude Code",
+    "version": "0.1.1"
+  },
+  "plugins": [
+    {
+      "name": "plugagent",
+      "source": "./",
+      "version": "0.1.1",
+      "description": "A personal agent that learns your preferences and records your work."
+    }
+  ]
+}

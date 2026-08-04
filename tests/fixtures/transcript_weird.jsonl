@@ -1,0 +1,4 @@
+{"type":"user","sessionId":"weird1234-aaaa-1111-2222-333344445555","message":null}
+{"type":"user","message":"plain string"}
+{"type":"assistant","sessionId":99999999,"message":{"role":"assistant","content":null}}
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":123}]}}

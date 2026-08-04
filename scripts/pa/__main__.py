@@ -1,0 +1,134 @@
+import sys
+from pathlib import Path
+
+if __package__ in (None, ""):  # executed as `python3 scripts/pa` — make `pa` importable
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if not argv:
+        print("usage: pa <capture|memory|distill|wiki|raw|vault|config|status> ...")
+        return 1
+    cmd, args = argv[0], argv[1:]
+    if cmd == "capture":
+        try:
+            from pa import capture, config
+            if args[:1] == ["--transcript"] and len(args) == 2:
+                capture.run(args[1])
+        except Exception as e:  # capture must never break the session
+            try:
+                from pa import config as _c
+                with open(_c.state_dir() / "errors.log", "a", encoding="utf-8") as f:
+                    import datetime
+                    f.write(f"{datetime.datetime.now():%Y-%m-%d %H:%M:%S} capture: {e!r}\n")
+            except Exception:
+                import sys as _s
+                print(f"pa capture error: {e!r}", file=_s.stderr)
+        return 0
+    if cmd == "memory":
+        try:
+            from pa import memory
+            if args[:1] == ["list"]:
+                memory.rebuild_index()
+                print(memory.hot_index_text())
+                return 0
+            if args[:1] == ["show"] and len(args) == 2:
+                print(memory.show(args[1]))
+                return 0
+            if args[:1] == ["add"] and len(args) == 5:
+                memory.add(args[1], args[2], args[3], args[4])
+                print(f"saved card {args[1]!r}")
+                return 0
+            if args[:1] == ["recall"] and len(args) == 2:
+                for h in memory.recall(args[1]):
+                    print(f"## {h['name']} — {h['description']}\n{h['body']}\n")
+                return 0
+            if args[:1] == ["forget"] and len(args) == 2:
+                ok = memory.forget(args[1])
+                print("forgotten" if ok else f"no card named {args[1]!r}")
+                return 0
+            print("usage: pa memory list [--hot] | show <name> | "
+                  "add <name> <description> <type> <body> | recall <kw> | forget <name>")
+            return 1
+        except Exception as e:
+            print(f"pa: {e}")
+            return 1
+    if cmd == "distill":
+        try:
+            from pa import distill
+            if args[:1] == ["pending"]:
+                for p in distill.pending():
+                    print(p.name)
+                return 0
+            if args[:1] == ["advance"] and args[1:2] == ["--to"] and len(args) == 3:
+                distill.advance(args[2])
+                return 0
+            print("usage: pa distill pending | pa distill advance --to <raw-filename>")
+            return 1
+        except Exception as e:
+            print(f"pa: {e}")
+            return 1
+    if cmd == "wiki":
+        try:
+            from pa import distill
+            if args[:1] == ["put"] and len(args) == 2:
+                page = distill.put_from_stdin(args[1])
+                print(f"wrote {page}")
+                return 0
+            print("usage: pa wiki put <relpath>   (content on stdin)")
+            return 1
+        except Exception as e:
+            print(f"pa: {e}")
+            return 1
+    if cmd == "raw":
+        try:
+            from pa import distill
+            if args[:1] == ["forget"] and len(args) == 2:
+                ok, n = distill.raw_forget(args[1])
+                if ok:
+                    print("deleted")
+                    return 0
+                if n == 0:
+                    print(f"no match for {args[1]!r} — nothing deleted")
+                else:
+                    print(f"{n} matches for {args[1]!r} — be more specific")
+                return 1
+            print("usage: pa raw forget <session-id-fragment>")
+            return 1
+        except Exception as e:
+            print(f"pa: {e}")
+            return 1
+    if cmd == "status":
+        try:
+            from pa import status
+            print(status.full() if args[:1] == ["--full"] else status.one_line())
+            return 0
+        except Exception as e:
+            print(f"pa: {e}")
+            return 1
+    if cmd == "vault" and args == ["reinit"]:
+        from pa import config
+        config.vault_reinit()
+        print("vault markers cleared — next write will re-create the vault")
+        return 0
+    if cmd == "config":
+        try:
+            from pa import config
+            if args[:1] == ["get"] and len(args) == 2:
+                print(config.load().get(args[1]))
+                return 0
+            if args[:1] == ["set"] and len(args) == 3:
+                config.set_value(args[1], args[2])
+                return 0
+            print("usage: pa config get <key> | pa config set <key> <value>")
+            return 1
+        except Exception as e:
+            print(f"pa: {e}")
+            return 1
+    print(f"pa: unknown command {cmd!r}")
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,25 @@
+---
+name: brief
+description: >
+  Brief the user on their recent work ("what did I do yesterday / last week?")
+  from the PlugAgent vault. Invoked via the core plugagent skill's routing.
+---
+
+# Brief
+
+Mirror the user's language. Text-first (no charts in Phase 1).
+
+1. Determine the window from the request (yesterday / last week / N days). If
+   the request names no window, default to the last 7 days and say which
+   window you used.
+2. List `raw/sessions/` files whose date prefix falls in the window; read them.
+3. Read `wiki/log.md` tail for capture/distill events in the window.
+4. Compose: 3–8 bullet summary grouped by project (use `cwd` frontmatter),
+   then one line of "open threads" if any session ended mid-task. Sessions
+   without a `cwd` (e.g. unparsed pointer captures) go in an "unknown" group
+   and are mentioned as unparsed captures.
+5. If the window has no captures, say so and show `pa status` (maybe capture
+   is off or failing — don't guess silently).
+
+This skill is read-only: every step above only reads (`raw/sessions/` files,
+`wiki/log.md`, `pa status`). Nothing here writes to the vault.
