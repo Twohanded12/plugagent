@@ -36,3 +36,41 @@ shim mode 755 verified).
 
 Post-smoke: smoke artifacts removed from the real home; plugin left installed;
 capture left OFF pending the owner's real onboarding.
+
+## Team smoke (run on separate hardware — dev-Mac install prohibited by owner policy)
+
+Team mode needs `age` (`brew install age`) and a **real private GitHub repo**
+(empty at start). Run on two machines, or two `PLUGAGENT_HOME`s on one machine
+(each with a distinct `vault` path). Never run the install steps on the dev
+Mac — owner policy.
+
+1. **Leader init** (machine/HOME 1): create an empty private repo, then
+   `pa team init acme --repo <url> --as alice`. Verify `team.key` printed and
+   the repo has a `team.json` commit. The leader is share-ready immediately —
+   `--as` claims the `alice` namespace, no separate self-join.
+2. **Share two pages**: distill or `pa wiki put` two pages, then
+   `pa team share <a>.md` and `pa team share <b>.md`. Verify each reports
+   "shared".
+3. **Member join** (machine/HOME 2): copy `team.key` over securely, then
+   `pa team join <url> --key <path> --as bob`. Verify success summary; delete
+   the received key copy.
+4. **Sync + attributed recall**: `pa team sync --force`, then wake the agent and
+   ask "what do we know about <topic>?" → the answer cites the leader's shared
+   page **with member attribution** (e.g. "(teammate's shared page)").
+5. **Ciphertext-only eyeball**: open the repo on github.com in a browser. Verify
+   the only visible files are `team.json` and `*.age` blobs — no plaintext page
+   bodies, no `.md` under `members/`. Open one `.age` file: it must be
+   unreadable ciphertext.
+6. **Leak-guard spot check**: in the leader's local clone
+   (`~/.plugagent/teams/acme/repo`), hand-place a plaintext file
+   (`echo secret > leak.md`), `git add` + `git commit` it, then attempt a push
+   via `pa team sync --force` (or `pa team share` of any page). The push must be
+   **refused** by the leak guard — verify nothing reached the remote (the
+   plaintext file is not on github.com).
+7. **Kill-switch spot check**: `pa config set capture off` does not affect team
+   reads (cache-based) but confirm personal capture stays off during the run;
+   `pa team status` reports each team's last-sync age, unpushed count, and
+   decrypt-failure count.
+
+Record date + build + verdicts below (execution deferred to separate hardware
+per owner policy).

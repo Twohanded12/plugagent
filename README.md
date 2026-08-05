@@ -1,7 +1,9 @@
 # PlugAgent
 
-> **Status:** Phase 1, v0.1 — single-user, local-only. Team features (opt-in
-> sharing with obfuscation) are Phase 2.
+> **Status:** v0.2 — personal use plus opt-in, end-to-end-encrypted team
+> sharing of the wiki layer. Page content is encrypted at rest; metadata
+> (member names, page paths, commit times) is not — see
+> [Team mode](#team-mode-v02).
 
 PlugAgent is a personal agent that learns you and records your work, running
 entirely as a Claude Code plugin. While you work in normal Claude Code
@@ -119,12 +121,38 @@ plugin's installed copy — your agent runs these for you when asked):
   `~/.plugagent/state/`. Capture failures never break your session — they
   are logged and surfaced as a one-line notice on the next wake.
 
+## Team mode (v0.2)
+
+Opt-in: a small group can share **distilled wiki pages** through a private git
+repository, encrypted end-to-end with [age](https://github.com/FiloSottile/age).
+Each member owns a namespace in the repo, writes only into their own, and reads
+everyone's — with attribution — in recall. Raw sessions and memory cards never
+leave your machine. Team mode is the only feature that needs `age`
+(`brew install age`); personal mode stays dependency-free.
+
+```
+# leader, once (needs an empty private repo) — claims the "alice" namespace, share-ready:
+pa team init acme --repo git@github.com:acme/brain.git --as alice
+# then hand team.key to members over a secure channel — never commit or post it
+
+# each other member, once per machine:
+pa team join git@github.com:acme/brain.git --key ~/team.key --as bob
+```
+
+Then `pa team share concepts/auth.md` shares a page, and asking your agent
+"what do we know about X?" folds in teammates' shared pages. **Honesty note:**
+page *content* is encrypted at rest, but *metadata* — member names, page paths
+(a path is the page title), and commit times — is visible to whoever hosts the
+repo. Full details, the departure/re-key procedure, and troubleshooting are in
+[`docs/team-guide.md`](docs/team-guide.md).
+
 ## Roadmap
 
-Phase 2 adds opt-in team sharing: the distilled layers (wiki and memory) can
-be promoted to a shared repository, with an obfuscation option — raw
-transcripts never leave your machine. Verification records for the current
-release live in [`docs/verification/`](docs/verification/).
+Team sharing of the wiki layer has landed (see above). Still ahead:
+memory-card sharing, re-key automation (`pa team rekey` — the departure
+procedure is manual in v1), and filename/metadata privacy (paths are currently
+plaintext). Raw transcripts never leave your machine. Verification records for
+the current release live in [`docs/verification/`](docs/verification/).
 
 ## License
 

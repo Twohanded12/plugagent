@@ -107,6 +107,47 @@ def main(argv=None):
         except Exception as e:
             print(f"pa: {e}")
             return 1
+    if cmd == "team":
+        _TEAM_USAGE = ("usage: pa team init <name> --repo <url> --as <member> | "
+                      "join <url> --key <file> --as <member> | "
+                      "sync [--force] [--team T] | share <wiki-relpath> [--team T] | status")
+
+        def _flag(args, name):
+            if name not in args:
+                return None
+            i = args.index(name)
+            if i + 1 >= len(args):
+                raise Exception(f"{name} needs a value")
+            return args[i + 1]
+
+        try:
+            from pa import team
+            if args[:1] == ["init"] and len(args) == 6 and args[2] == "--repo" and args[4] == "--as":
+                print(team.init_team(args[1], args[3], args[5]))
+                return 0
+            if args[:1] == ["join"] and len(args) == 6 and args[2] == "--key" and args[4] == "--as":
+                from pathlib import Path as _P
+                print(team.join_team(args[1], _P(args[3]).expanduser(), args[5]))
+                return 0
+            if args[:1] == ["sync"]:
+                name = _flag(args, "--team")
+                print(team.sync(team.resolve_team(name), force="--force" in args))
+                return 0
+            if args[:1] == ["share"] and len(args) >= 2:
+                if args[1].startswith("--"):
+                    print(_TEAM_USAGE)
+                    return 1
+                name = _flag(args, "--team")
+                print(team.share(team.resolve_team(name), args[1]))
+                return 0
+            if args[:1] == ["status"]:
+                print(team.status_report())
+                return 0
+            print(_TEAM_USAGE)
+            return 1
+        except Exception as e:
+            print(f"pa: {e}")
+            return 1
     if cmd == "vault" and args == ["reinit"]:
         from pa import config
         config.vault_reinit()

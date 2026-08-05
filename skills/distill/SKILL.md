@@ -43,6 +43,12 @@ Mirror the user's language. **Nothing is written before the user approves.**
 6. Report in one paragraph: pages written, cursor position, anything skipped.
 7. If the user rejects everything: write nothing, do NOT advance the cursor,
    and say the raw files remain for a later pass.
+8. Team offer (only if a team is configured — `pa team status` not saying
+   "no team"): after ALL approved writes and the cursor advance are done, ask
+   in ONE line: "any of the pages I just wrote worth sharing with the team?"
+   If yes → per-page confirmation, then `pa team share <relpath>` each.
+   Skip any page the user already shared earlier in this same turn — do not
+   re-offer it. Declining ends the flow — never auto-share.
 
 ## Approval gate
 

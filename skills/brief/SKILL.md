@@ -20,6 +20,13 @@ Mirror the user's language. Text-first (no charts in Phase 1).
    and are mentioned as unparsed captures.
 5. If the window has no captures, say so and show `pa status` (maybe capture
    is off or failing — don't guess silently).
+6. Team activity is EXCLUDED from personal briefings. Only when the user
+   explicitly asks about the team ("what did the team do last week?") do you
+   read the team cache — group by member, cite with attribution, and note
+   staleness if the last sync is old. "we"/"us" without naming the team stays
+   personal (default to personal on ambiguity). Brief does not run `pa team
+   sync` (it stays side-effect-free) — team pages are served from whatever the
+   last recall pulled; say "as of the last sync" when presenting them.
 
 This skill is read-only: every step above only reads (`raw/sessions/` files,
 `wiki/log.md`, `pa status`). Nothing here writes to the vault.

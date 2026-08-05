@@ -35,6 +35,8 @@ CLI base: `python3 "$CLAUDE_PLUGIN_ROOT/scripts/pa"` (referred to as `pa …`).
      recreate the vault on its own.
    Separately: errors > 0 → "capture has failed N times — want me to diagnose?"
    and move on.
+   Team staleness is NOT checked at wake — sync runs lazily when a team intent
+   arrives (skills/team, skills/recall).
    Then (vault `ok` or `not created yet`) `pa memory list --hot` — hold the
    hot index only; fetch card bodies just-in-time with `pa memory show <name>`
    / `pa memory recall <kw>` (never by reading card files directly — stats
@@ -50,10 +52,16 @@ CLI base: `python3 "$CLAUDE_PLUGIN_ROOT/scripts/pa"` (referred to as `pa …`).
 | Remember this ("always do X", "I prefer Y") | Capture rule below |
 | Forget ("forget that", "delete that session") | Forget rules below |
 | Status ("how are you doing?") | `pa status --full`, explain in user's language |
+| Team: join/init ("connect to team repo", "set up a team") | Follow skills/team |
+| Team: share ("share this page with the team") | Follow skills/team |
+| Team: status ("how's the team sync?") | Follow skills/team |
 | Anything else | Answer normally; you are still a full Claude Code session |
 
 Tiebreak: time-window questions route to brief even when about decisions;
-topic questions route to recall.
+topic questions route to recall. The Team: rows cover ONLY join/init,
+sharing, and sync-status. Team read/summary questions ("what did the team
+do / decide") still route to recall (topic) or brief (time-window), never to
+skills/team.
 
 If a routed skill is unavailable, degrade gracefully: answer read-only from
 the vault with citations; never write.
