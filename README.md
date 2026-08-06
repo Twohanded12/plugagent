@@ -1,9 +1,10 @@
 # PlugAgent
 
-> **Status:** v0.2 — personal use plus opt-in, end-to-end-encrypted team
-> sharing of the wiki layer. Page content is encrypted at rest; metadata
-> (member names, page paths, commit times) is not — see
-> [Team mode](#team-mode-v02).
+> **Status:** v0.3 — personal use plus opt-in, end-to-end-encrypted team
+> sharing of the wiki layer, now with re-key automation for rotating a
+> compromised or departing-member team key. Page content is encrypted at
+> rest; metadata (member names, page paths, commit times) is not — see
+> [Team mode](#team-mode-v03).
 
 PlugAgent is a personal agent that learns you and records your work, running
 entirely as a Claude Code plugin. While you work in normal Claude Code
@@ -121,7 +122,7 @@ plugin's installed copy — your agent runs these for you when asked):
   `~/.plugagent/state/`. Capture failures never break your session — they
   are logged and surfaced as a one-line notice on the next wake.
 
-## Team mode (v0.2)
+## Team mode (v0.3)
 
 Opt-in: a small group can share **distilled wiki pages** through a private git
 repository, encrypted end-to-end with [age](https://github.com/FiloSottile/age).
@@ -140,7 +141,9 @@ pa team join git@github.com:acme/brain.git --key ~/team.key --as bob
 ```
 
 Then `pa team share concepts/auth.md` shares a page, and asking your agent
-"what do we know about X?" folds in teammates' shared pages. **Honesty note:**
+"what do we know about X?" folds in teammates' shared pages. Rotate the team
+key with `pa team rekey` (members then run `pa team rekey-accept`) — forward
+secrecy only; see the guide. **Honesty note:**
 page *content* is encrypted at rest, but *metadata* — member names, page paths
 (a path is the page title), and commit times — is visible to whoever hosts the
 repo. Full details, the departure/re-key procedure, and troubleshooting are in
@@ -148,11 +151,12 @@ repo. Full details, the departure/re-key procedure, and troubleshooting are in
 
 ## Roadmap
 
-Team sharing of the wiki layer has landed (see above). Still ahead:
-memory-card sharing, re-key automation (`pa team rekey` — the departure
-procedure is manual in v1), and filename/metadata privacy (paths are currently
-plaintext). Raw transcripts never leave your machine. Verification records for
-the current release live in [`docs/verification/`](docs/verification/).
+Team sharing of the wiki layer and re-key automation (`pa team rekey` /
+`pa team rekey-accept` — forward-secrecy only) have both landed (see above).
+Still ahead: memory-card sharing and filename/metadata privacy (paths are
+currently plaintext). Raw transcripts never leave your machine. Verification
+records for the current release live in
+[`docs/verification/`](docs/verification/).
 
 ## License
 

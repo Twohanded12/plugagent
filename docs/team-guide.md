@@ -71,28 +71,54 @@ memory cards. Distill also offers to share pages it just wrote.
 | Exposed (documented) | **Metadata**: member names, page paths (a path *is* the page title — `concepts/auth.md.age` reveals that an auth doc exists), and commit times/frequency. v1 keeps plaintext paths for simplicity and diff-ability. |
 | Unprotected by design | Your **local decrypted cache** at `~/.plugagent/teams/<team>/cache/`. The threat model is the hosting provider, not your own machine (which already holds your raw sessions). |
 
-## Member departure & re-keying (manual in v1)
+## Member departure & re-keying
 
 Because all members share one key, **a departed member can still decrypt the
-repo — past and future — until the team re-keys.** v1 ships the procedure, not
-an automation (`pa team rekey` is deferred). Re-keying is a manual, leader-led
-operation:
+repo until the team re-keys.** Re-keying is leader-driven with an explicit
+member-accept step:
 
-1. Leader generates a new keypair: `age-keygen -o team-new.key` (note the new
-   `age1…` recipient it prints).
-2. Leader redistributes `team-new.key` to the *remaining* members over a secure
-   channel, and updates `recipient` in the repo's `team.json` to the new public
-   key (commit + push).
-3. Each member re-encrypts every page in their own `members/<name>/` namespace:
-   decrypt each `*.age` with the **old** key, re-encrypt with the **new**
-   recipient, commit, and push (force-replacing the old ciphertext).
-4. Everyone replaces their local `~/.plugagent/teams/<team>/team.key` with the
-   new key and runs `pa team sync --force`.
+1. **Leader rotates the key:**
 
-**Honest limitation:** the departed member keeps any copy of the old key and any
-data they already pulled; re-keying only protects data written *after* the
-re-key. During the transition, pages a member has not yet re-encrypted will
-fail to decrypt for others — that is expected (see troubleshooting).
+   ```
+   pa team rekey [--team <team-name>]
+   ```
+
+   This generates a new keypair, re-encrypts the leader's own namespace,
+   bumps `key_version` in the repo's `team.json`, and pushes — all in one
+   atomic step. It prints the path to the new `team.key` plus the honest
+   forward-only limitation.
+2. **Leader distributes the new `team.key`** to the *remaining* members over a
+   secure channel (the same way the original key was handed out — password
+   manager, encrypted message, in person). Your agent will not send it for you.
+3. **Each member accepts:**
+
+   ```
+   pa team rekey-accept --key <path-to-new-team.key> [--team <team-name>]
+   ```
+
+   Accept verifies the received key against the repo's new recipient (refusing
+   on mismatch — if so, ask the leader for the current key), installs it,
+   re-encrypts the member's own namespace, and bumps their local generation.
+   Until a member accepts, `pa team share` is **refused** for them ("team
+   rekeyed — run rekey-accept first"); reads keep working from cache.
+
+**Accept in order — don't skip generations.** The transition keeps only the
+*immediately-previous* key locally (a single `team.key.prev`). If the leader
+re-keys twice (v1 → v2 → v3) before a member has accepted v2, that member can
+no longer re-encrypt their own v1 pages, and those pages become unreadable for
+the rest of the team. So members should accept each re-key before the next one,
+and leaders should confirm everyone has accepted before rotating again.
+`pa team status` shows each member's own generation and flags when they are
+behind (`rekey pending (leader vN, you vM)`) — use it to spot lagging members
+before re-keying again.
+
+**Honest limitation (forward secrecy only).** Re-keying protects data written
+*after* the re-key. It does **not** revoke past access: the git history's
+earlier ciphertext stays decryptable with the old key, so an already-cloned
+departed member keeps read access up to the re-key point. True past-data
+revocation would require rewriting git history (force-push), which is out of
+scope. During the transition, pages a member has not yet re-encrypted will fail
+to decrypt for others — that is expected (see troubleshooting).
 
 ## Second-machine rejoin (deliberate namespace reuse)
 

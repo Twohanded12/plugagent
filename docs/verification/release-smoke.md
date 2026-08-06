@@ -72,5 +72,32 @@ Mac — owner policy.
    `pa team status` reports each team's last-sync age, unpushed count, and
    decrypt-failure count.
 
+### Re-key cycle (real age, same session as the Phase 2 real-age gate)
+
+Runs in the **same age-equipped session** as Phase 2's still-pending real-age
+gate (steps 1–7 above) — both must pass before any release relying on the
+confidentiality/rotation guarantee. Continues from the acme team built above
+(leader `alice` / HOME 1, member `bob` / HOME 2, at least one shared page each).
+
+8. **Leader rekey** (HOME 1): `pa team rekey --team acme`. Verify it reports the
+   rotation to `v2`, prints the path to the new `team.key`, and relays the
+   forward-only limitation. Confirm `pa team status` now shows `key v2` for the
+   leader.
+9. **Distribute + member accept** (HOME 2): copy the new `team.key` over
+   securely, then `pa team rekey-accept --key <path> --team acme`. Verify it
+   reports acceptance of `v2`; `pa team status` for `bob` now shows `key v2`
+   (no longer "rekey pending"). Delete the received key copy.
+10. **key_version incremented, `.age`-only on github.com**: open the repo in a
+    browser. Verify `team.json`'s `key_version` is `2` (and `recipient` is the
+    new `age1…`), and the only other visible files are `*.age` blobs — no
+    plaintext, no `.md` under `members/`.
+11. **Forward secrecy (v1 key can't read v2)**: keep a copy of the *old* v1
+    `team.key`. Pick a page re-encrypted at the rekey (or newly shared after it)
+    and attempt `age -d -i <old-v1-key> <that>.age` — it must **fail** to
+    decrypt. Confirm the current v2 key decrypts it. This is the forward-secrecy
+    invariant: post-rekey ciphertext is unreadable with the retired key.
+12. **Share resumes after accept**: back in HOME 2, `pa team share <a-page>.md`
+    now succeeds (it was refused with "team rekeyed" before step 9).
+
 Record date + build + verdicts below (execution deferred to separate hardware
 per owner policy).

@@ -22,7 +22,7 @@ def test_init_creates_repo_meta_and_key(env):
     committed = json.loads(
         subprocess.run(["git", "-C", str(team.repo_dir("alpha")), "show",
                         "HEAD:team.json"], capture_output=True, text=True).stdout)
-    assert committed == {"name": "alpha", "recipient": "age1fake",
+    assert committed == {"name": "alpha", "recipient": "age1fake-v1",
                         "schema_version": 1}
     assert team.key_path("alpha").exists()
     local = team.load_local("alpha")
@@ -35,20 +35,20 @@ def test_join_validates_and_builds_cache(env, tmp_path, monkeypatch):
     # simulate a second machine: fresh home
     home2 = tmp_path / "home2"
     key_copy = tmp_path / "received.key"
-    key_copy.write_text("FAKEKEY")
+    key_copy.write_text("FAKEKEY-v1")
     monkeypatch.setenv("PLUGAGENT_HOME", str(home2))
     config.set_value("vault", str(tmp_path / "vault2"))
     team.join_team(str(remote), key_copy, "alice")
     local = team.load_local("alpha")        # name read from committed team.json
     assert local["member"] == "alice"
-    assert team.key_path("alpha").read_text() == "FAKEKEY"
+    assert team.key_path("alpha").read_text() == "FAKEKEY-v1"
     assert oct(team.key_path("alpha").stat().st_mode).endswith("600")
 
 
 def test_join_rejects_bad_member_name(env, tmp_path):
     _tmp, remote = env
     team.init_team("alpha", str(remote), "lead")
-    key = tmp_path / "k"; key.write_text("FAKEKEY")
+    key = tmp_path / "k"; key.write_text("FAKEKEY-v1")
     with pytest.raises(team.TeamError, match="invalid member name"):
         team.join_team(str(remote), key, "Not/Safe")
 
@@ -77,7 +77,7 @@ def test_join_rejects_taken_member_name(env, tmp_path, monkeypatch):
     subprocess.run(["git", "-C", str(repo), "push", "-q"], check=True)
     monkeypatch.setenv("PLUGAGENT_HOME", str(tmp_path / "home2"))
     config.set_value("vault", str(tmp_path / "vault2"))
-    key = tmp_path / "k"; key.write_text("FAKEKEY")
+    key = tmp_path / "k"; key.write_text("FAKEKEY-v1")
     with pytest.raises(team.TeamError, match="already taken"):
         team.join_team(str(remote), key, "alice")
 
@@ -105,7 +105,7 @@ def test_join_failure_cleans_up(env, tmp_path, monkeypatch):
     monkeypatch.setenv("PLUGAGENT_HOME", str(tmp_path / "home2"))
     config.set_value("vault", str(tmp_path / "vault2"))
     key_copy = tmp_path / "received2.key"
-    key_copy.write_text("FAKEKEY")
+    key_copy.write_text("FAKEKEY-v1")
 
     def boom(name, cfg):
         raise RuntimeError("disk full")
@@ -126,7 +126,7 @@ def test_join_wipes_markerless_debris(env, tmp_path, monkeypatch):
     monkeypatch.setenv("PLUGAGENT_HOME", str(tmp_path / "home2"))
     config.set_value("vault", str(tmp_path / "vault2"))
     key_copy = tmp_path / "received3.key"
-    key_copy.write_text("FAKEKEY")
+    key_copy.write_text("FAKEKEY-v1")
     debris = team.team_dir("alpha")
     debris.mkdir(parents=True)
     (debris / "junk.txt").write_text("leftover from a killed join")
@@ -147,7 +147,7 @@ def test_join_rejects_bad_meta(env, tmp_path):
     subprocess.run(["git", "-C", str(work), "add", "team.json"], check=True)
     subprocess.run(["git", "-C", str(work), "commit", "-q", "-m", "bad meta"], check=True)
     subprocess.run(["git", "-C", str(work), "push", "-q"], check=True)
-    key = tmp_path / "k"; key.write_text("FAKEKEY")
+    key = tmp_path / "k"; key.write_text("FAKEKEY-v1")
     with pytest.raises(team.TeamError, match="not a valid"):
         team.join_team(str(remote), key, "alice")
 

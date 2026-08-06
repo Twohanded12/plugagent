@@ -110,7 +110,8 @@ def main(argv=None):
     if cmd == "team":
         _TEAM_USAGE = ("usage: pa team init <name> --repo <url> --as <member> | "
                       "join <url> --key <file> --as <member> | "
-                      "sync [--force] [--team T] | share <wiki-relpath> [--team T] | status")
+                      "sync [--force] [--team T] | share <wiki-relpath> [--team T] | "
+                      "rekey [--team T] | rekey-accept --key <file> [--team T] | status")
 
         def _flag(args, name):
             if name not in args:
@@ -139,6 +140,16 @@ def main(argv=None):
                     return 1
                 name = _flag(args, "--team")
                 print(team.share(team.resolve_team(name), args[1]))
+                return 0
+            if args[:1] == ["rekey-accept"] and "--key" in args:
+                from pathlib import Path as _P
+                key = _P(_flag(args, "--key")).expanduser()
+                name = _flag(args, "--team")
+                print(team.rekey_accept(team.resolve_team(name), key))
+                return 0
+            if args[:1] == ["rekey"]:
+                name = _flag(args, "--team")
+                print(team.rekey(team.resolve_team(name)))
                 return 0
             if args[:1] == ["status"]:
                 print(team.status_report())

@@ -55,7 +55,43 @@ hint, relay it in ONE line and stop.
    escaping path, never raw sessions, never memory cards.
 2. Confirm ONCE with the page name and team name, then run
    `pa team share <relpath> [--team T]`.
-3. Relay the result: shared, or saved-pending-retry on network failure.
+3. Relay the result: shared, or saved-pending-retry on network failure. If the
+   share is refused with "team rekeyed", the team key has rotated — run
+   rekey-accept first (see "Accept a re-key" below), then re-share.
+
+## Re-key (leader) ("rotate our team key")
+
+The leader rotates the shared key when a member leaves or the key may be
+compromised.
+
+1. Confirm the intent once with the team name, then run
+   `pa team rekey [--team T]`.
+2. Relay the command's output VERBATIM — it carries the redistribution
+   instruction and the honest forward-only limitation (past ciphertext in the
+   git history stays decryptable with the old key; anyone who already cloned
+   keeps read access up to this point). Do not soften or summarize away that
+   limitation.
+3. Never offer to send, forward, attach, or otherwise transmit the new
+   team.key over any channel or tool — the leader distributes it themselves
+   over a secure channel of their choosing. Members must run
+   `pa team rekey-accept` before they can share again.
+4. On error (e.g. the leader is behind the repo generation), relay the
+   one-line `pa:` message; usually the fix is `pa team sync` /
+   `pa team rekey-accept` to reach the current generation first.
+
+## Accept a re-key (member) ("accept the new team key")
+
+When `pa team status` or a sync says a re-key is pending:
+
+1. Ask the user for the FILE path of the new team.key the leader sent them.
+   Never accept a key pasted inline into chat — it must be a file; if they
+   paste one, tell them to save it to a file and delete the chat copy.
+2. Run `pa team rekey-accept --key '<path>' [--team T]`.
+3. On a key-mismatch error ("doesn't match the current team key"), tell them to
+   get the current team.key from the leader over a secure channel and retry —
+   do not loop.
+4. On success, relay the result and mention: sharing resumes now, and they
+   should delete the received key copy (it now lives in their PlugAgent config).
 
 ## Status ("how's the team sync?")
 

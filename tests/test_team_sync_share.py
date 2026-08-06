@@ -60,7 +60,7 @@ def test_sync_decrypts_to_cache_and_builds_index(joined, tmp_path):
         subprocess.run(["git", "-C", str(bob), "config", k, v], check=True)
     page = bob / "members/bob/wiki/notes/tips.md.age"
     page.parent.mkdir(parents=True)
-    page.write_bytes(b"FAKEAGE:---\ndescription: Bob tips\n---\n\nbe kind\n")
+    page.write_bytes(b"FAKEAGE:v1:---\ndescription: Bob tips\n---\n\nbe kind\n")
     subprocess.run(["git", "-C", str(bob), "add", "-A"], check=True)
     subprocess.run(["git", "-C", str(bob), "commit", "-q", "-m", "share"], check=True)
     subprocess.run(["git", "-C", str(bob), "push", "-q"], check=True)
