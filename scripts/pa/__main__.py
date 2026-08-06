@@ -111,7 +111,9 @@ def main(argv=None):
         _TEAM_USAGE = ("usage: pa team init <name> --repo <url> --as <member> | "
                       "join <url> --key <file> --as <member> | "
                       "sync [--force] [--team T] | share <wiki-relpath> [--team T] | "
-                      "rekey [--team T] | rekey-accept --key <file> [--team T] | status")
+                      "rekey [--team T] | rekey-accept --key <file> [--team T] | "
+                      "privacy on [--team T] | privacy-accept --fnkey <file> [--team T] | "
+                      "status")
 
         def _flag(args, name):
             if name not in args:
@@ -150,6 +152,16 @@ def main(argv=None):
             if args[:1] == ["rekey"]:
                 name = _flag(args, "--team")
                 print(team.rekey(team.resolve_team(name)))
+                return 0
+            if args[:2] == ["privacy", "on"]:
+                name = _flag(args, "--team")
+                print(team.privacy_on(team.resolve_team(name)))
+                return 0
+            if args[:1] == ["privacy-accept"] and "--fnkey" in args:
+                from pathlib import Path as _P
+                fnkey = _P(_flag(args, "--fnkey")).expanduser()
+                name = _flag(args, "--team")
+                print(team.privacy_accept(team.resolve_team(name), fnkey))
                 return 0
             if args[:1] == ["status"]:
                 print(team.status_report())

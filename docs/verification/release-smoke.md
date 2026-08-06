@@ -99,5 +99,33 @@ confidentiality/rotation guarantee. Continues from the acme team built above
 12. **Share resumes after accept**: back in HOME 2, `pa team share <a-page>.md`
     now succeeds (it was refused with "team rekeyed" before step 9).
 
+### Filename privacy (real age, same session as the real-age gate)
+
+Runs in the **same age-equipped session** as the team smoke and re-key cycle
+above (real private GitHub repo, leader `alice` / HOME 1, member `bob` / HOME 2,
+at least one shared page each). Exercises opt-in path hiding end-to-end.
+
+13. **Leader turns on privacy** (HOME 1): `pa team privacy on --team acme`.
+    Verify it reports privacy is ON, prints the path to the **fnkey**, and
+    relays the paths-only scope (member names / page counts / commit times stay
+    visible; pre-privacy history keeps old plaintext paths). Confirm
+    `pa team status` now shows `privacy: hashed` for the leader.
+14. **Hashed names on github.com**: open the repo in a browser. Verify the
+    leader's already-shared pages are now `<32-hex>.age` under
+    `members/alice/wiki/` — **no real title appears** in the file tree, and the
+    commit message that renamed them is `privacy: on` (no plaintext path in it
+    either). `team.json` shows `privacy: "hashed"` and `schema_version: 2`. A
+    per-member `members/alice/manifest.age` exists (opaque ciphertext).
+15. **Second member accepts** (HOME 2): copy the fnkey over securely, then
+    `pa team privacy-accept --fnkey <path> --team acme`. Verify it reports
+    acceptance; bob's own pre-privacy pages are now renamed to `<32-hex>.age` on
+    github.com; `pa team status` for bob shows `privacy: hashed` (no longer
+    `privacy pending`). Delete the received fnkey copy.
+16. **Recall still resolves real titles**: back in either home,
+    `pa team sync --force`, then wake the agent and ask "what do we know about
+    `<topic>`?" → the answer still cites the shared pages by their **real
+    titles** with member attribution — the hashed host layout is transparent to
+    recall (the manifest maps hashes back to paths locally).
+
 Record date + build + verdicts below (execution deferred to separate hardware
 per owner policy).

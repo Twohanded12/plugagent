@@ -68,7 +68,7 @@ memory cards. Distill also offers to share pages it just wrote.
 | | |
 |---|---|
 | Protected | Page **content** at rest on the host — ciphertext only. A repo leak reveals no page bodies. |
-| Exposed (documented) | **Metadata**: member names, page paths (a path *is* the page title — `concepts/auth.md.age` reveals that an auth doc exists), and commit times/frequency. v1 keeps plaintext paths for simplicity and diff-ability. |
+| Exposed (documented) | **Metadata**: member names, page paths (a path *is* the page title — `concepts/auth.md.age` reveals that an auth doc exists), and commit times/frequency. Plaintext paths are the default; a team can opt into hiding them — see [Filename privacy](#filename-privacy-v04) — which still leaves member names, page counts, and commit times visible. |
 | Unprotected by design | Your **local decrypted cache** at `~/.plugagent/teams/<team>/cache/`. The threat model is the hosting provider, not your own machine (which already holds your raw sessions). |
 
 ## Member departure & re-keying
@@ -119,6 +119,75 @@ departed member keeps read access up to the re-key point. True past-data
 revocation would require rewriting git history (force-push), which is out of
 scope. During the transition, pages a member has not yet re-encrypted will fail
 to decrypt for others — that is expected (see troubleshooting).
+
+## Filename privacy (v0.4)
+
+By default a shared page's **path is plaintext** on the host — `concepts/auth.md.age`
+tells anyone with repo access that an auth doc exists, because the path *is* the
+page title. A team can opt into hiding paths: shared pages are stored under
+`<32-hex>.age` names (a keyed hash of the real path), and the real paths live
+only inside a per-member, age-encrypted `manifest.age`.
+
+**What it hides:** page **paths / titles** only. `concepts/auth.md` becomes an
+opaque `9f3c…​.age` on the host, and neither the tree nor the commit messages
+reveal it.
+
+**What it does NOT hide:** member names (`members/<name>/` folders stay
+plaintext), page **counts and sizes**, and **commit times/frequency** — all
+still visible to whoever hosts the repo. And it does **not** rewrite history:
+pre-privacy git history keeps the old plaintext paths. Turning privacy on
+renames pages going forward; it does not scrub the past.
+
+The filename key (**fnkey**) is a *second secret*, independent of the age key.
+The age key still encrypts page bodies and the manifest, so every member can
+*read* the real paths; the fnkey is what *computes* the hashed names, so only
+fnkey holders can *write* new hashed pages. Handle it exactly like the
+`team.key`.
+
+1. **Leader turns it on:**
+
+   ```
+   pa team privacy on [--team <team-name>]
+   ```
+
+   This generates the fnkey, renames the leader's own already-shared pages to
+   their hashed names, writes the manifest, flips `team.json` to
+   `privacy: "hashed"` / `schema_version: 2`, and pushes — all in one atomic
+   step. It prints the path to the fnkey plus the honest paths-only scope.
+
+2. **Leader distributes the fnkey** over the **same secure channel as the age
+   key** (password manager, encrypted message, in person). Never commit it,
+   never post it publicly, never paste it into a chat log. Your agent will not
+   send it for you — distribution is yours to do deliberately.
+
+3. **Each member accepts:**
+
+   ```
+   pa team privacy-accept --fnkey <path-to-fnkey> [--team <team-name>]
+   ```
+
+   Accept trial-verifies the fnkey against an existing hashed page (refusing a
+   wrong fnkey with no local change — if so, ask whoever enabled privacy for the
+   current fnkey), installs it, and renames the member's own already-shared
+   pages to hashed names. If the leader turned privacy on before anyone shared a
+   page, there is nothing to verify against yet — accept installs the fnkey and
+   warns that it couldn't verify; the member's first share will use it. Until a
+   member accepts, `pa team share` is **refused** for them ("filename privacy is
+   on … run `pa team privacy-accept --fnkey <file>` before sharing"); reads keep
+   working from cache.
+
+**Convergence.** The team is fully path-hidden only once **every member has
+accepted**. An un-accepted member's already-shared pages keep their plaintext
+names until they accept, so a partially-converged team shows a mix of hashed and
+plaintext filenames on the host. This is expected during the rollout — chase the
+laggards (`pa team status` flags them as `privacy pending`).
+
+**Re-key interaction.** The fnkey is *fixed* — it is not rotated. A re-key
+rotates the age key and re-encrypts the manifest (so a post-rekey joiner can
+still decrypt the path map), but the **hashed filenames stay stable** across a
+re-key. Filename privacy and re-key are mutually exclusive while either is
+mid-transition: finish one before starting the other (the CLI refuses with a
+one-line hint if you interleave them).
 
 ## Second-machine rejoin (deliberate namespace reuse)
 

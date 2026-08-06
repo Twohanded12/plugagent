@@ -4,13 +4,13 @@
   "owner": { "name": "PlugAgent" },
   "metadata": {
     "description": "PlugAgent — plugin-form personal agent for Claude Code",
-    "version": "0.3.0"
+    "version": "0.4.0"
   },
   "plugins": [
     {
       "name": "plugagent",
       "source": "./",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "description": "A personal agent that learns your preferences and records your work."
     }
   ]

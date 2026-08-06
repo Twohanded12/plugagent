@@ -1,6 +1,6 @@
 {
   "name": "plugagent",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "PlugAgent — a personal agent that learns your preferences and records your work, running entirely on Claude Code.",
   "author": { "name": "PlugAgent" }
 }

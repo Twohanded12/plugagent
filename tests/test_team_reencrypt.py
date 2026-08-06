@@ -78,3 +78,29 @@ def test_reencrypt_refuses_symlinked_age(joined, tmp_path):
     assert "members/lead/wiki/sneaky.md.age" in failures
     assert link.is_symlink() and link.resolve() == outside.resolve()  # not followed/rewritten
     assert outside.read_bytes() == b"OUTSIDE"                          # target untouched
+
+
+def test_reencrypt_rotates_manifest_above_wiki(tmp_path, monkeypatch):
+    fake_crypto(monkeypatch)
+    repo = tmp_path / "repo"
+    ns = repo / "members" / "alice"
+    (ns / "wiki").mkdir(parents=True)
+    r1, k1 = teamcrypto.keygen(tmp_path / "g1")
+    (ns / "wiki" / ("a" * 32 + ".age")).write_bytes(teamcrypto.encrypt(r1, b"# page"))
+    team._write_manifest(ns / "manifest.age", r1, {"a" * 32: "concepts/auth.md"})
+    r2, k2 = teamcrypto.keygen(tmp_path / "g2")
+    team._reencrypt_namespace(repo, "alice", new_key=k2, prev_key=k1,
+                              new_recipient=r2)
+    assert team._read_manifest(ns / "manifest.age", k2, None) == {"a" * 32: "concepts/auth.md"}
+
+
+def test_reencrypt_manifest_is_idempotent(tmp_path, monkeypatch):
+    fake_crypto(monkeypatch)
+    repo = tmp_path / "repo"
+    ns = repo / "members" / "alice"
+    (ns / "wiki").mkdir(parents=True)
+    r2, k2 = teamcrypto.keygen(tmp_path / "g2")
+    team._write_manifest(ns / "manifest.age", r2, {"a" * 32: "x.md"})   # already gen 2
+    before = (ns / "manifest.age").read_bytes()
+    team._reencrypt_namespace(repo, "alice", new_key=k2, prev_key=k2, new_recipient=r2)
+    assert (ns / "manifest.age").read_bytes() == before

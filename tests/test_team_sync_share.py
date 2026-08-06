@@ -162,7 +162,7 @@ def test_sync_handles_D_status_deletion_without_relying_on_orphan_sweep(joined, 
     subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "rm"], check=True)
     teamgit.push_with_rebase(repo)
 
-    monkeypatch.setattr(team, "_remove_cache_orphans", lambda name: None)
+    monkeypatch.setattr(team, "_remove_cache_orphans", lambda name, manifests: None)
     team.sync("alpha", force=True)
     assert not (team.cache_dir("alpha") / "members/alice/wiki/concepts/temp2.md").exists()
 

@@ -93,6 +93,45 @@ When `pa team status` or a sync says a re-key is pending:
 4. On success, relay the result and mention: sharing resumes now, and they
    should delete the received key copy (it now lives in their PlugAgent config).
 
+## Turn on filename privacy (leader) ("hide our page titles")
+
+By default shared-page paths are plaintext on the host (a path *is* the page
+title). The leader can opt into hiding them: pages get stored under hashed
+`<32-hex>.age` names, with real paths only inside an encrypted manifest.
+
+1. Confirm the intent once with the team name, then run
+   `pa team privacy on [--team T]`.
+2. Relay the command's output VERBATIM — it carries the fnkey path and the
+   honest paths-only scope: filename privacy hides page PATHS only; member
+   names, page counts, and commit times stay visible, and pre-privacy git
+   history keeps the old plaintext paths (no history rewrite). Do not soften or
+   summarize away that limitation.
+3. The fnkey is a SECOND secret, handled exactly like the team.key. Never offer
+   to send, forward, attach, or otherwise transmit the fnkey over any channel or
+   tool — the leader distributes it themselves over a secure channel of their
+   choosing (the same one used for the team.key). Members must run
+   `pa team privacy-accept --fnkey <file>` before they can share.
+4. On error (e.g. the leader is behind the repo generation, or a re-key is in
+   progress), relay the one-line `pa:` message; usually the fix is
+   `pa team sync` / `pa team rekey-accept` first.
+
+## Accept filename privacy (member) ("accept the filename-privacy key")
+
+When `pa team status` or a share refusal says filename privacy is pending:
+
+1. Ask the user for the FILE path of the fnkey the leader sent them. Never
+   accept a key pasted inline into chat — it must be a file; if they paste one,
+   tell them to save it to a file and delete the chat copy.
+2. Run `pa team privacy-accept --fnkey '<path>' [--team T]`.
+3. On a mismatch error ("this fnkey isn't this team's"), tell them to get the
+   current fnkey from whoever enabled privacy and retry — do not loop. If the
+   output warns it "couldn't verify the fnkey yet" (no hashed page exists to
+   check against), relay that as-is — it installed and their first share will
+   use it.
+4. On success, relay the result and mention: sharing under hashed names resumes
+   now, and they should delete the received fnkey copy (it now lives in their
+   PlugAgent config).
+
 ## Status ("how's the team sync?")
 
 Run `pa team status` and present it in the user's language, per team, one line
@@ -102,9 +141,9 @@ progress and point to the guide.
 
 ## Boundaries
 
-- Never display, read aloud, copy, or move the team.key file's contents.
-- Never offer to send, forward, attach, or otherwise transmit the team.key on
-  the user's behalf — over any channel or tool. The user distributes it
-  themselves over a secure channel of their choosing.
+- Never display, read aloud, copy, or move the team.key or fnkey file's contents.
+- Never offer to send, forward, attach, or otherwise transmit the team.key or
+  the fnkey on the user's behalf — over any channel or tool. The user
+  distributes them themselves over a secure channel of their choosing.
 - Every share needs the user's explicit confirmation in this conversation.
 - Team writes go ONLY through `pa team` commands.

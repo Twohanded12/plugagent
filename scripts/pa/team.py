@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 from pa import config, teamgit
+from pa.filenames import MAX_KNOWN_SCHEMA
 
 SCHEMA_VERSION = 1
 SYNC_TTL_SECONDS = 900
@@ -158,10 +159,14 @@ def _read_committed_meta(repo: Path) -> dict:
         raise TeamError("not a valid PlugAgent team repository (bad team.json: name)")
     if not isinstance(meta.get("recipient"), str):
         raise TeamError("not a valid PlugAgent team repository (bad team.json: recipient)")
-    if meta.get("schema_version") != SCHEMA_VERSION:
-        raise TeamError("team repo schema_version mismatch — update the plugin")
-    # key_version is additive (spec §2): absent on legacy Phase 2 repos = gen 1.
-    # Never gate schema_version on it.
+    # widened gate (spec §2): accept any schema this client knows (<= MAX),
+    # refuse higher (a future schema it can't read). Guard None/non-int first
+    # so a legacy/garbled team.json refuses cleanly instead of `None > 2`.
+    sv = meta.get("schema_version")
+    if not isinstance(sv, int) or sv > MAX_KNOWN_SCHEMA:
+        raise TeamError("team repo schema_version unsupported — update the plugin")
+    # additive fields (spec §2): default plain; key_version defaults to gen 1.
+    meta["privacy"] = meta.get("privacy", "plain")
     meta["key_version"] = meta.get("key_version", 1)
     return meta
 
@@ -274,17 +279,46 @@ def share(name: str, relpath: str) -> str:
         raise TeamError(f"no such wiki page {relpath!r} — nearby: {candidates}")
     meta = _read_committed_meta(repo)
     blob = teamcrypto.encrypt(meta["recipient"], page.read_bytes())
-    dest = repo / "members" / cfg["member"] / "wiki" / (relpath + ".age")
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_bytes(blob)
-    dest_rel = dest.relative_to(repo).as_posix()
+    member = cfg["member"]
+    if meta["privacy"] == "hashed":
+        from pa import filenames
+        fnkey_file = filenames.fnkey_path(team_dir(name))
+        if not fnkey_file.exists():
+            raise TeamError(
+                "filename privacy is on for this team — get the fnkey and run "
+                "`pa team privacy-accept --fnkey <file>` before sharing")
+        fnkey = fnkey_file.read_bytes()
+        h = filenames.hmac_filename(fnkey, relpath)
+        manifest_path = repo / "members" / member / "manifest.age"
+        mapping = _read_manifest(manifest_path, key_path(name),
+                                 prev_key_path(name) if prev_key_path(name).exists() else None) \
+            if manifest_path.exists() else {}
+        if mapping.get(h, relpath) != relpath:
+            raise TeamError(f"hash collision writing {relpath!r} — refusing "
+                            "(astronomically rare; report this)")
+        dest = repo / "members" / member / "wiki" / (h + ".age")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(blob)
+        mapping[h] = relpath
+        _write_manifest(manifest_path, meta["recipient"], mapping)
+        add_paths = [dest.relative_to(repo).as_posix(),
+                     manifest_path.relative_to(repo).as_posix()]
+        commit_msg = f"share: {h}"
+    else:
+        dest = repo / "members" / member / "wiki" / (relpath + ".age")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(blob)
+        add_paths = [dest.relative_to(repo).as_posix()]
+        commit_msg = f"share: {relpath}"
+
     import subprocess
-    subprocess.run(["git", "-C", str(repo), "add", dest_rel], check=True, capture_output=True)
-    status = subprocess.run(["git", "-C", str(repo), "status", "--porcelain", "--", dest_rel],
+    subprocess.run(["git", "-C", str(repo), "add", "--", *add_paths],
+                   check=True, capture_output=True)
+    status = subprocess.run(["git", "-C", str(repo), "status", "--porcelain", "--", *add_paths],
                             capture_output=True, text=True)
     if not status.stdout.strip():
         return f"nothing new to share for {relpath!r} (already up to date)"
-    subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", f"share: {relpath}"],
+    subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", commit_msg],
                    check=True, capture_output=True)
     try:
         teamgit.push_with_rebase(repo)
@@ -334,27 +368,76 @@ def sync(name, force: bool = False) -> str:
             return _dirty_sync_message(repo)
         return f"sync failed (network?): {teamgit._first_line(pulled.stderr)} — serving stale cache"
     meta = _read_committed_meta(repo)
+    # Per-member {h: rel} maps for hashed members (manifest.age present). Uses the
+    # two-key fallback; a member whose manifest won't decrypt is skipped
+    # (skip-don't-poison) and their hashed pages are left for a later sync.
+    from pa import filenames
+    prev = prev_key_path(name)
+    prev_arg = prev if prev.exists() else None
+    manifests = {}                    # member -> {h: rel}
+    bad_manifest_members = set()
+    failures = []
+    members_root = repo / "members"
+    if members_root.exists():
+        for m_dir in sorted(members_root.iterdir()):
+            man = m_dir / "manifest.age"
+            if man.exists() and not man.is_symlink():
+                try:
+                    manifests[m_dir.name] = _read_manifest(man, key_path(name), prev_arg)
+                except Exception:
+                    # skip-don't-poison: the member's hashed pages stay in the
+                    # last-good cache, but surface the unreadable manifest as a
+                    # decrypt failure so the sync summary reports it (and it is
+                    # re-detected here every sync until the manifest is fixed).
+                    bad_manifest_members.add(m_dir.name)
+                    failures.append(man.relative_to(repo).as_posix())
     changed = teamgit.changed_age_files(repo, cfg.get("last_synced_commit"))
     # Retry previously-failed decrypts even when unchanged (re-key transitions:
     # skip-don't-poison means skipped, not forgotten)
     retry = [(rel, "M") for rel in cfg.get("decrypt_failures", [])
              if (rel, "M") not in changed and (rel, "A") not in changed]
-    failures = []
     written = 0
     deleted = 0
     for rel, status in changed + retry:
         src = repo / rel
-        dest = cache_dir(name) / rel[: -len(".age")]
-        if status == "D":
-            # changed_age_files() reports both plain deletions and the
-            # vacated side of a rename as "D" — remove the stale cache copy
-            # directly here rather than waiting on the orphan sweep (which
-            # stays on as a backstop for anything this loop doesn't see,
-            # e.g. cache entries orphaned by a run that crashed mid-sync).
-            if dest.exists() or dest.is_symlink():
-                dest.unlink()
-                deleted += 1
+        parts = Path(rel).parts            # members/<m>/wiki/<name...>
+        member = parts[1] if len(parts) > 2 and parts[0] == "members" else None
+        leaf = Path(rel).name
+        if leaf == "manifest.age":
+            continue                        # handled above, never a cache page
+        hashed_member = (repo / "members" / (member or "") / "manifest.age").exists() \
+            if member else False
+        if hashed_member and status == "D":
+            # A hashed page removed upstream drops its <h> from the manifest, so
+            # its real path is NOT resolvable here (plan-review Minor #5). Leave
+            # the cache cleanup to the manifest-aware orphan sweep, which
+            # reverse-maps by real path. Just skip it in the loop.
             continue
+        if hashed_member and member in bad_manifest_members:
+            failures.append(rel)            # manifest didn't decrypt this run — retry later
+            continue
+        # resolve the cache destination by filename shape
+        if filenames.is_hashed_age(leaf) and member in manifests:
+            real = manifests[member].get(leaf[: -len(".age")])
+            if real is None:
+                # <h>.age present but not in the manifest (blob ahead of manifest
+                # / a race) → skip-don't-poison, resolves next sync
+                failures.append(rel)
+                continue
+            dest = cache_dir(name) / "members" / member / "wiki" / real
+        else:
+            # plain member (existing logic), including plain D-handling below
+            dest = cache_dir(name) / rel[: -len(".age")]
+            if status == "D":
+                # changed_age_files() reports both plain deletions and the
+                # vacated side of a rename as "D" — remove the stale cache copy
+                # directly here rather than waiting on the orphan sweep (which
+                # stays on as a backstop for anything this loop doesn't see,
+                # e.g. cache entries orphaned by a run that crashed mid-sync).
+                if dest.exists() or dest.is_symlink():
+                    dest.unlink()
+                    deleted += 1
+                continue
         if src.is_symlink():
             # A teammate's repo should never contain a symlinked .age file —
             # decrypting through one could read/leak anything on this
@@ -389,7 +472,7 @@ def sync(name, force: bool = False) -> str:
             dest.unlink()
         dest.write_bytes(data)
         written += 1
-    _remove_cache_orphans(name)
+    _remove_cache_orphans(name, manifests)
     _rebuild_index(name)
     cfg["last_sync"] = time.time()
     cfg["last_synced_commit"] = teamgit.head_commit(repo)
@@ -498,7 +581,99 @@ def _reencrypt_namespace(repo: Path, member: str, new_key: Path,
         tmp = age_file.with_name(age_file.name + ".tmp")
         tmp.write_bytes(new_blob)
         os.replace(tmp, age_file)                 # atomic
+
+    # Also rotate the per-member manifest (spec §4 / round-1 CRIT #1). It lives
+    # ABOVE wiki/, so the rglob above never sees it. Same idempotent contract:
+    # if it already opens under new_key it's this generation → skip.
+    manifest = repo / "members" / member / "manifest.age"
+    if manifest.exists() and not manifest.is_symlink():
+        blob = manifest.read_bytes()
+        try:
+            teamcrypto.decrypt(new_key, blob)                 # already new gen
+        except teamcrypto.DecryptError:
+            try:
+                data = teamcrypto.decrypt(prev_key, blob)
+            except teamcrypto.DecryptError:
+                failures.append(str(manifest.relative_to(repo)))
+            else:
+                new_blob = teamcrypto.encrypt(new_recipient, data)
+                tmp = manifest.with_name(manifest.name + ".tmp")
+                tmp.write_bytes(new_blob)
+                os.replace(tmp, manifest)
     return failures
+
+
+def _write_manifest(path: Path, recipient: str, mapping: dict) -> None:
+    """Encrypt a {hash: relpath} map to the team recipient and write it
+    atomically. Encrypted with the AGE key (via recipient), NOT the fnkey — so
+    every member can READ paths; only fnkey holders can COMPUTE names (spec §2)."""
+    import os
+    from pa import teamcrypto
+    from pa import filenames
+    blob = teamcrypto.encrypt(recipient, filenames.manifest_to_bytes(mapping))
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_bytes(blob)
+    os.replace(tmp, path)
+
+
+def _read_manifest(path: Path, key: Path, prev_key) -> dict:
+    """Decrypt a manifest with the current key, falling back to prev_key (the
+    same two-key transition fallback sync uses). Raises DecryptError if neither
+    opens it (caller decides skip-don't-poison)."""
+    from pa import teamcrypto
+    from pa import filenames
+    blob = path.read_bytes()
+    try:
+        data = teamcrypto.decrypt(key, blob)
+    except teamcrypto.DecryptError:
+        if prev_key is not None and Path(prev_key).exists():
+            data = teamcrypto.decrypt(prev_key, blob)      # may raise → caller handles
+        else:
+            raise
+    return filenames.bytes_to_manifest(data)
+
+
+def _rebase_to_hashed(repo: Path, member: str, fnkey: bytes, recipient: str,
+                      key: Path, prev_key) -> dict:
+    """Rename every plaintext page under members/<member>/wiki/ to its hashed
+    name (git mv — content blob unchanged) and write members/<member>/manifest.age.
+    Returns the {hash: relpath} map.
+
+    IDEMPOTENT: the map is SEEDED from the existing manifest.age (if present)
+    before the walk, so entries for pages already hashed by a prior partial run
+    are preserved — a resume on an already-hashed tree finds no plaintext files
+    to add and re-writes the SAME manifest instead of emptying it. key/prev_key
+    are only for reading that existing manifest."""
+    import subprocess
+    from pa import filenames
+    manifest = repo / "members" / member / "manifest.age"
+    mapping = {}
+    if manifest.exists() and not manifest.is_symlink():
+        try:
+            mapping = _read_manifest(manifest, key, prev_key)      # seed (survive resume)
+        except Exception:
+            mapping = {}                                           # unreadable → rebuild fresh
+    base = repo / "members" / member / "wiki"
+    if base.exists():
+        for age_file in sorted(base.rglob("*.age")):
+            if age_file.is_symlink():
+                continue
+            name = age_file.name
+            if filenames.is_hashed_age(name):
+                continue                                           # already hashed → already in seed
+            rel = age_file.relative_to(base).as_posix()
+            assert rel.endswith(".age")
+            rel = rel[: -len(".age")]                              # e.g. "concepts/auth.md"
+            h = filenames.hmac_filename(fnkey, rel)
+            dest = base / (h + ".age")
+            subprocess.run(["git", "-C", str(repo), "mv",
+                            str(age_file.relative_to(repo).as_posix()),
+                            str(dest.relative_to(repo).as_posix())],
+                           check=True, capture_output=True)
+            mapping[h] = rel
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    _write_manifest(manifest, recipient, mapping)
+    return mapping
 
 
 def _rekey_marker(name: str) -> Path:
@@ -516,6 +691,10 @@ def rekey(name: str) -> str:
     if not cfg.get("member"):
         raise TeamError("no member identity for this team — join first")
     repo = repo_dir(name)
+    from pa import filenames
+    if filenames.privacy_marker(team_dir(name)).exists():
+        raise TeamError("a filename-privacy transition is in progress — finish "
+                        "`pa team privacy on`/`privacy-accept` before re-keying")
     marker = _rekey_marker(name)
 
     # --- Resume vs fresh start (crash-safety, spec §Crash-safety) ---
@@ -700,6 +879,10 @@ def rekey_accept(name: str, received_key: Path) -> str:
     if not received_key.exists():
         raise TeamError(f"key file not found: {received_key}")
     repo = repo_dir(name)
+    from pa import filenames
+    if filenames.privacy_marker(team_dir(name)).exists():
+        raise TeamError("a filename-privacy transition is in progress — finish "
+                        "`pa team privacy on`/`privacy-accept` before re-keying")
     marker = _rekey_marker(name)
 
     # --- Resume vs fresh start (crash-safety, mirrors rekey()) ---
@@ -828,23 +1011,255 @@ def rekey_accept(name: str, received_key: Path) -> str:
             "key copy you were sent — it now lives in your PlugAgent config.")
 
 
-def _remove_cache_orphans(name: str) -> None:
+def _privacy_marker(name: str) -> Path:
+    from pa import filenames
+    return filenames.privacy_marker(team_dir(name))
+
+
+def privacy_on(name: str) -> str:
+    from pa import teamcrypto, teamgit, filenames
+    import subprocess
+    teamcrypto.require_age()
+    cfg = load_local(name)
+    if not cfg.get("member"):
+        raise TeamError("no member identity for this team — join first")
+    repo = repo_dir(name)
+    marker = _privacy_marker(name)
+
+    # Mutual exclusion with re-key (spec §Crash-safety): never interleave two
+    # rebase-style rotations.
+    if _rekey_marker(name).exists():
+        raise TeamError("a re-key is in progress — run `pa team rekey` to finish "
+                        "it before turning on filename privacy")
+
+    resuming = marker.exists()
+    if resuming:
+        # privacy rebase renames files (git mv), unlike rekey's in-place content
+        # rewrite — a hashed name can't be reversed to its real path. So DISCARD
+        # any uncommitted partial rebase and redo from the committed plaintext
+        # HEAD (the privacy commit lands only at the very end, so on a pre-commit
+        # crash HEAD is still fully plaintext). This is the privacy analogue of
+        # rekey()'s `git checkout -- .`, strengthened to also drop staged renames.
+        subprocess.run(["git", "-C", str(repo), "reset", "--hard", "HEAD"],
+                       capture_output=True)
+
+    _pull_or_fail(repo)
+    meta = _read_committed_meta(repo)
+    if meta["privacy"] == "hashed":
+        if resuming:
+            # Our OWN interrupted transition already committed (crash between
+            # commit and marker cleanup). _pull_or_fail just pushed it; finish
+            # the leader-side steps that were skipped: sync + emit the
+            # fnkey-distribution guidance (plan-review Important #3). Do NOT
+            # early-return the terse no-op, or the leader is never told to hand
+            # out the fnkey and the feature half-completes silently.
+            marker.unlink(missing_ok=True)
+            sync(name, force=True)
+            return _privacy_on_guidance(name)
+        marker.unlink(missing_ok=True)
+        return f"team {name!r} already has filename privacy on — nothing to do"
+    if _local_generation(cfg) != meta["key_version"]:
+        raise TeamError(
+            f"team is at generation v{meta['key_version']} — run "
+            "`pa team rekey-accept`/`sync` to catch up before turning on privacy")
+
+    # fnkey: generate once and persist (600) BEFORE the marker, so a resume finds
+    # the same key. If a fnkey already exists (resume, or a re-run), reuse it.
+    fnkey_file = filenames.fnkey_path(team_dir(name))
+    if not fnkey_file.exists():
+        import os
+        fd = os.open(str(fnkey_file), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            os.write(fd, filenames.gen_fnkey())
+        finally:
+            os.close(fd)
+    fnkey = fnkey_file.read_bytes()
+
+    marker.write_text("{}\n", encoding="utf-8")     # local-only, no path data
+
+    _rebase_to_hashed(repo, cfg["member"], fnkey, meta["recipient"],
+                      key_path(name), prev_key_path(name) if prev_key_path(name).exists() else None)
+
+    # flip team.json in the SAME commit as the renames + manifest (atomic).
+    meta_path = repo / "team.json"
+    disk = json.loads(meta_path.read_text(encoding="utf-8"))
+    disk["privacy"] = "hashed"
+    disk["schema_version"] = 2
+    meta_path.write_text(json.dumps(disk, indent=2) + "\n", encoding="utf-8")
+
+    # Stage: git mv already staged the renames. The manifest is UNTRACKED on the
+    # first transition, so `git add -u` would MISS it — add it explicitly. Then
+    # team.json. (round-2 MIN #4.)
+    member = cfg["member"]
+    subprocess.run(["git", "-C", str(repo), "add", "--",
+                    f"members/{member}/manifest.age", "team.json"],
+                   check=True, capture_output=True)
+    staged = subprocess.run(["git", "-C", str(repo), "diff", "--cached", "--quiet"],
+                            capture_output=True)
+    if staged.returncode != 0:
+        subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "privacy: on"],
+                       check=True, capture_output=True)
+    try:
+        teamgit.push_with_rebase(repo)
+    except (teamgit.PushError, teamgit.LeakGuardError, teamgit.GitError) as e:
+        # Roll back to the remote so a retry starts clean (mirror rekey()). The
+        # fnkey stays on disk (harmless, reused on retry); the marker stays so a
+        # retry resumes.
+        subprocess.run(["git", "-C", str(repo), "fetch", "-q"], capture_output=True)
+        subprocess.run(["git", "-C", str(repo), "reset", "--hard", "@{u}"],
+                       capture_output=True)
+        raise TeamError(f"privacy-on push failed ({e}) — nothing changed on the "
+                        "remote; retry when the network recovers")
+
+    marker.unlink(missing_ok=True)
+    sync(name, force=True)
+    return _privacy_on_guidance(name)
+
+
+def _privacy_on_guidance(name: str) -> str:
+    from pa import filenames
+    fnkey_file = filenames.fnkey_path(team_dir(name))
+    return (f"filename privacy is ON for team {name!r}. Hand the fnkey "
+            f"({fnkey_file}) to members over a secure channel — never send, "
+            "forward, or attach it yourself over any channel or tool. Members run "
+            "`pa team privacy-accept --fnkey <file>` before they can share.\n"
+            "This hides page PATHS only: member names, page counts, and commit "
+            "times remain visible, and pre-privacy git history keeps old plaintext "
+            "paths (no history rewrite).")
+
+
+def _validate_fnkey(repo: Path, fnkey: bytes, key: Path, prev_key) -> str:
+    """Trial-HMAC the candidate fnkey against ANY already-hashed member's page.
+    Returns 'ok' on a match, 'unverifiable' if no hashed page exists anywhere
+    yet (empty manifests), or raises TeamError on a definite mismatch."""
+    from pa import filenames
+    members = repo / "members"
+    saw_a_page = False
+    if members.exists():
+        for m_dir in sorted(members.iterdir()):
+            man = m_dir / "manifest.age"
+            if not man.exists():
+                continue
+            try:
+                mapping = _read_manifest(man, key, prev_key)
+            except Exception:
+                continue
+            for h, rel in mapping.items():
+                saw_a_page = True
+                if filenames.hmac_filename(fnkey, rel) == h:
+                    return "ok"
+    if saw_a_page:
+        raise TeamError("this fnkey isn't this team's — ask whoever enabled "
+                        "privacy for the current fnkey")
+    return "unverifiable"
+
+
+def privacy_accept(name: str, received_fnkey: Path) -> str:
+    from pa import teamcrypto, teamgit, filenames
+    import os, subprocess
+    teamcrypto.require_age()
+    cfg = load_local(name)
+    if not cfg.get("member"):
+        raise TeamError("no member identity for this team — join first")
+    if not received_fnkey.exists():
+        raise TeamError(f"fnkey file not found: {received_fnkey}")
+    repo = repo_dir(name)
+    marker = _privacy_marker(name)
+    if _rekey_marker(name).exists():
+        raise TeamError("a re-key is in progress — finish `pa team rekey-accept` "
+                        "before accepting filename privacy")
+
+    resuming = marker.exists()
+    if resuming:
+        subprocess.run(["git", "-C", str(repo), "reset", "--hard", "HEAD"],
+                       capture_output=True)
+    _pull_or_fail(repo)
+    meta = _read_committed_meta(repo)
+    if meta["privacy"] != "hashed":
+        raise TeamError("filename privacy isn't enabled for this team yet — the "
+                        "leader must run `pa team privacy on` first")
+
+    fnkey = received_fnkey.read_bytes()
+    prev = prev_key_path(name)
+    prev_arg = prev if prev.exists() else None
+    verdict = _validate_fnkey(repo, fnkey, key_path(name), prev_arg)
+    warn = ("\nNote: couldn't verify the fnkey yet — no hashed page exists to "
+            "check against; your first share will use it.") if verdict == "unverifiable" else ""
+
+    fnkey_file = filenames.fnkey_path(team_dir(name))
+    if not fnkey_file.exists():
+        fd = os.open(str(fnkey_file), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            os.write(fd, fnkey)
+        finally:
+            os.close(fd)
+
+    marker.write_text("{}\n", encoding="utf-8")
+    # Pass the age key so the rebase SEEDS from an existing committed manifest —
+    # on a post-commit resume the tree is already hashed and this preserves the
+    # map instead of emptying it (plan-review Critical #1).
+    _rebase_to_hashed(repo, cfg["member"], fnkey, meta["recipient"],
+                      key_path(name), prev_arg)
+    member = cfg["member"]
+    # privacy-accept never touches team.json (leader already set privacy/schema).
+    subprocess.run(["git", "-C", str(repo), "add", "--",
+                    f"members/{member}/manifest.age"], check=True, capture_output=True)
+    staged = subprocess.run(["git", "-C", str(repo), "diff", "--cached", "--quiet"],
+                            capture_output=True)
+    if staged.returncode != 0:
+        subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m",
+                        f"privacy-accept: {member}"], check=True, capture_output=True)
+        try:
+            teamgit.push_with_rebase(repo)
+        except (teamgit.PushError, teamgit.LeakGuardError, teamgit.GitError) as e:
+            return (f"accepted privacy locally; push failed ({e}) — will retry on "
+                    "next sync." + warn)
+    marker.unlink(missing_ok=True)
+    sync(name, force=True)
+    return (f"filename privacy accepted for team {name!r} — your pages are now "
+            "stored under hashed names. Delete the received fnkey copy you were "
+            "sent; it now lives in your PlugAgent config." + warn)
+
+
+def _remove_cache_orphans(name: str, manifests: dict) -> None:
     repo, cache = repo_dir(name), cache_dir(name)
     if not cache.exists():
         return
     for cached in cache.rglob("*.md"):
         if cached.name == "index.md" and cached.parent == cache:
             continue
-        rel = cached.relative_to(cache)
-        src = repo / (str(rel) + ".age")
-        # A symlinked src (even a broken one) means the decrypt loop above
-        # already saw it and recorded a decrypt failure for it — that's the
-        # "skip, don't poison" contract: keep the last-good cached copy.
-        # src.exists() alone would follow the link and report False for a
-        # broken target, causing the sweep to delete the very copy the sync
-        # summary just claimed was kept.
-        if not (src.exists() or src.is_symlink()):
-            cached.unlink()
+        rel = cached.relative_to(cache)                    # members/<m>/wiki/<real>.md
+        parts = rel.parts
+        member = parts[1] if len(parts) > 2 and parts[0] == "members" else None
+        # A member is HASHED iff their manifest.age exists in the repo — NOT iff
+        # it decrypted this run (plan-review Critical #2). Deciding by the
+        # decrypted `manifests` dict would drop a hashed member whose manifest
+        # transiently failed to decrypt (e.g. a v1 reader during a v2 re-key
+        # window) into the plain branch, whose repo/(rel+".age") check never
+        # matches a hashed layout → it would delete the last-good cache every
+        # sync, violating skip-don't-poison.
+        hashed = bool(member) and (repo / "members" / member / "manifest.age").exists()
+        if hashed:
+            if member not in manifests:
+                # manifest present but undecryptable this run → keep last-good,
+                # never sweep (skip-don't-poison).
+                continue
+            # live iff some manifest entry maps to this real path. Reverse-map
+            # via the manifest (age key only, NOT the fnkey).
+            wiki_rel = Path(*parts[3:]).as_posix() if len(parts) > 3 else ""
+            if wiki_rel not in set(manifests[member].values()):
+                cached.unlink()
+        else:
+            # plain member (existing logic): live iff its <rel>.age is present.
+            # A symlinked src (even a broken one) means the decrypt loop above
+            # already saw it and recorded a decrypt failure for it — that's the
+            # "skip, don't poison" contract: keep the last-good cached copy.
+            # src.exists() alone would follow the link and report False for a
+            # broken target, causing the sweep to delete the very copy the sync
+            # summary just claimed was kept.
+            src = repo / (str(rel) + ".age")
+            if not (src.exists() or src.is_symlink()):
+                cached.unlink()
 
 
 def _rebuild_index(name: str) -> None:
@@ -902,9 +1317,19 @@ def status_report() -> str:
             keyline = f"key v{local_gen}"
             if repo_gen > local_gen:
                 keyline += f" — rekey pending (leader v{repo_gen}, you v{local_gen}; run rekey-accept)"
+            from pa import filenames
+            privacy = "plain"
+            if repo_dir(name).exists():
+                try:
+                    privacy = _read_committed_meta(repo_dir(name))["privacy"]
+                except TeamError:
+                    privacy = "plain"
+            privline = f"privacy: {privacy}"
+            if privacy == "hashed" and not filenames.fnkey_path(team_dir(name)).exists():
+                privline += " — privacy pending (run privacy-accept)"
             lines.append(
                 f"{name} — member: {cfg.get('member') or '(not joined)'}, "
-                f"{keyline}, last sync: {age}, cached pages: {cache_pages}, "
+                f"{keyline}, {privline}, last sync: {age}, cached pages: {cache_pages}, "
                 f"unpushed files: {unpushed}, "
                 f"decrypt failures: {len(cfg.get('decrypt_failures', []))}")
         except TeamError as e:
