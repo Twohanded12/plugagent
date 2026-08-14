@@ -424,6 +424,22 @@ def sync(name, force: bool = False) -> str:
                 # / a race) → skip-don't-poison, resolves next sync
                 failures.append(rel)
                 continue
+            if (Path(real).is_absolute() or ".." in Path(real).parts
+                    or "\x00" in real or not Path(real).parts):
+                # A manifest value is content written by whichever member owns
+                # that namespace, so it must be validated before it is joined
+                # onto a local path. Left unchecked:
+                #   - an ABSOLUTE value writes decrypted content to an arbitrary
+                #     path outside the cache (arbitrary file write);
+                #   - ".." escapes the member's cache directory;
+                #   - an embedded NUL raises ValueError and crashes sync;
+                #   - "" or "." collapse the join back to the member root, and
+                #     dest.write_bytes then raises IsADirectoryError.
+                # The last three matter doubly because sync() is contractually
+                # soft-failing: one bad entry from any teammate would otherwise
+                # crash sync permanently for every member.
+                failures.append(rel)
+                continue
             dest = cache_dir(name) / "members" / member / "wiki" / real
         else:
             # plain member (existing logic), including plain D-handling below
