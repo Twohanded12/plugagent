@@ -127,5 +127,44 @@ at least one shared page each). Exercises opt-in path hiding end-to-end.
     titles** with member attribution — the hashed host layout is transparent to
     recall (the manifest maps hashes back to paths locally).
 
+### Memory-card sharing (real age, same session as the real-age gate)
+
+Runs in the **same age-equipped session** as the sections above (leader `alice`
+/ HOME 1, member `bob` / HOME 2). Exercises opt-in, per-card promotion end to
+end. Give alice at least three personal cards first (`pa memory add …`), and
+use one of them a few times so it carries non-zero `uses:`/`last_used:`.
+
+17. **Promote exactly one card** (HOME 1): `pa team share-card <card> --team acme`.
+    First run must be **refused** with the schema-3 lockout warning; re-run with
+    `--confirm-schema-bump` and verify it reports the promotion, that usage
+    statistics were stripped, and that the personal card is unchanged
+    (`pa memory show <card>` still shows it; the file's `uses:` is intact).
+    Re-run the same command once more: it must report "already up to date"
+    without creating a commit.
+18. **Card-only, ciphertext-only on github.com**: open the repo in a browser.
+    Verify `members/alice/memory/` holds exactly ONE `.age` blob (or one
+    `<32-hex>.age` if privacy is on), that the two unpromoted card names appear
+    **nowhere** in the tree or commit messages, and that `team.json` shows
+    `schema_version: 3`.
+19. **Receive + attribution + off switch** (HOME 2): `pa team sync --force`,
+    then `pa memory list` → a `## Team cards (read-only)` section with
+    `(team: alice)` attribution; `pa memory show <card>` prints the
+    `(team: alice, read-only)` header and NO `uses:`/`last_used:` line. Add a
+    personal card of the same name → it wins, and the team line is marked
+    `(shadowed by your card)`. Run `pa team memory off --team acme` → the team
+    section disappears immediately, `pa team status` shows `(team memory off)`,
+    and the repo's `team.json` is **unchanged** (the opt-out is local only).
+    `pa team memory on` restores it.
+20. **Withdraw** (HOME 1): `pa team unshare-card <card> --team acme`. Verify the
+    forward-only sentence is printed, the blob is gone from `members/alice/memory/`
+    on github.com (and the manifest entry with it, if privacy is on), and after
+    `pa team sync --force` in HOME 2 the card is gone from `pa memory list` and
+    from the local cache. Alice's personal card is still in her vault.
+21. **Zero-unpromoted-cards backstop**: run
+    `python3 -m pytest tests/test_team_memory_integration.py -q` on this
+    age-equipped machine — the `@needs_age` test
+    (`test_zero_unpromoted_cards_and_zero_statistics_in_all_objects`) must PASS,
+    not skip. It scans **all** git objects, not just HEAD.
+
 Record date + build + verdicts below (execution deferred to separate hardware
 per owner policy).

@@ -1,6 +1,6 @@
 [project]
 name = "plugagent"
-version = "0.3.0"
+version = "0.5.0"
 description = "PlugAgent — a personal agent that learns and records, as a Claude Code plugin"
 requires-python = ">=3.9"
 

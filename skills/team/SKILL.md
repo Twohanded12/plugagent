@@ -2,9 +2,11 @@
 name: team
 description: >
   Team features for PlugAgent: join a team repository (wizard), share a wiki
-  page with the team, explain team status, run the leader's init. Invoked via
-  the core plugagent skill's routing on team intents ("connect me to the team
-  repo", "share this with the team", "how's the team sync?").
+  page with the team, promote or withdraw a single memory card, turn received
+  team cards off, explain team status, run the leader's init. Invoked via the
+  core plugagent skill's routing on team intents ("connect me to the team
+  repo", "share this with the team", "share that preference with the team",
+  "how's the team sync?").
 ---
 
 # Team
@@ -50,9 +52,10 @@ hint, relay it in ONE line and stop.
 ## Sharing ("share X with the team")
 
 1. Identify the wiki page — a wiki page (relative path like `concepts/auth.md`);
-   list `wiki/` matches if ambiguous. Only vault wiki pages can be shared: the
-   input must be a `.md` page inside your vault wiki, never an absolute or
-   escaping path, never raw sessions, never memory cards.
+   list `wiki/` matches if ambiguous. `pa team share` takes vault wiki pages
+   only: the input must be a `.md` page inside your vault wiki, never an
+   absolute or escaping path, never raw sessions, never memory cards (a card is
+   promoted by name with `pa team share-card` — see below).
 2. Confirm ONCE with the page name and team name, then run
    `pa team share <relpath> [--team T]`.
 3. Relay the result: shared, or saved-pending-retry on network failure. If the
@@ -132,6 +135,47 @@ When `pa team status` or a share refusal says filename privacy is pending:
    now, and they should delete the received fnkey copy (it now lives in their
    PlugAgent config).
 
+## Share a memory card ("share that preference with the team")
+
+Personal memory cards stay local unless the user promotes one, one at a time.
+**The user names the card.** Never promote a card on your own initiative: not
+as a side effect of saving one, not "while we're at it", not in bulk, and never
+a card you merely inferred they meant. If the request is vague ("share what you
+know about our lint rules"), list the candidate card names from
+`pa memory list` and ask which one — do not choose for them.
+
+1. Confirm ONCE with the card name and the team name, then run
+   `pa team share-card <card-name> [--team T]`.
+2. If the CLI refuses because this is the **first** memory card on the team,
+   relay that message VERBATIM — it says the repo schema rises to 3 and
+   teammates still on v0.4.0 will be locked out of the team layer until they
+   upgrade. Ask the user whether to proceed; only on an explicit yes, re-run
+   with `--confirm-schema-bump`. Do not add the flag pre-emptively.
+3. Relay the result, including that usage statistics were stripped and their
+   personal card is unchanged. Mention that only this card was shared.
+4. On error, relay the one-line `pa:` message: "team rekeyed" → run
+   `pa team rekey-accept` first, then re-share; "filename privacy is on" → run
+   `pa team privacy-accept --fnkey <file>` first; "another member changed
+   team.json first" → simply re-run the same command.
+
+## Withdraw a shared card ("stop sharing that card")
+
+1. Confirm ONCE with the card name and team name, then run
+   `pa team unshare-card <card-name> [--team T]`.
+2. Relay the output VERBATIM — it carries the forward-only limitation (this
+   stops FUTURE access only; anyone who already cloned the repository keeps the
+   old ciphertext from its history). Do not soften or summarize it away.
+3. Their personal card is untouched by this — say so. If the CLI says the card
+   "is not shared with team", tell them it was never promoted; nothing to undo.
+
+## Team cards on/off ("stop mixing the team's cards into mine")
+
+1. Run `pa team memory off [--team T]` (or `on` to re-enable).
+2. Relay that it is local only — teammates are not told who opted out — and
+   that it takes effect immediately, in this session.
+3. This is not a withdrawal: cards the user promoted stay shared. If they want
+   to take one back, that is `unshare-card` above.
+
 ## Status ("how's the team sync?")
 
 Run `pa team status` and present it in the user's language, per team, one line
@@ -146,4 +190,6 @@ progress and point to the guide.
   the fnkey on the user's behalf — over any channel or tool. The user
   distributes them themselves over a secure channel of their choosing.
 - Every share needs the user's explicit confirmation in this conversation.
+- Never promote a memory card on your own initiative — the user names the card,
+  every time, one card per confirmation. Raw sessions are never shareable.
 - Team writes go ONLY through `pa team` commands.

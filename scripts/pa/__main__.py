@@ -36,19 +36,23 @@ def main(argv=None):
             if args[:1] == ["show"] and len(args) == 2:
                 print(memory.show(args[1]))
                 return 0
+            if args[:1] == ["show"] and len(args) == 4 and args[2] == "--from":
+                print(memory.show(args[1], member=args[3]))
+                return 0
             if args[:1] == ["add"] and len(args) == 5:
                 memory.add(args[1], args[2], args[3], args[4])
                 print(f"saved card {args[1]!r}")
                 return 0
             if args[:1] == ["recall"] and len(args) == 2:
                 for h in memory.recall(args[1]):
-                    print(f"## {h['name']} — {h['description']}\n{h['body']}\n")
+                    who = f" (team: {h['member']})" if h.get("member") else ""
+                    print(f"## {h['name']} — {h['description']}{who}\n{h['body']}\n")
                 return 0
             if args[:1] == ["forget"] and len(args) == 2:
                 ok = memory.forget(args[1])
                 print("forgotten" if ok else f"no card named {args[1]!r}")
                 return 0
-            print("usage: pa memory list [--hot] | show <name> | "
+            print("usage: pa memory list [--hot] | show <name> [--from <member>] | "
                   "add <name> <description> <type> <body> | recall <kw> | forget <name>")
             return 1
         except Exception as e:
@@ -113,6 +117,8 @@ def main(argv=None):
                       "sync [--force] [--team T] | share <wiki-relpath> [--team T] | "
                       "rekey [--team T] | rekey-accept --key <file> [--team T] | "
                       "privacy on [--team T] | privacy-accept --fnkey <file> [--team T] | "
+                      "share-card <name> [--confirm-schema-bump] [--team T] | "
+                      "unshare-card <name> [--team T] | memory on|off [--team T] | "
                       "status")
 
         def _flag(args, name):
@@ -162,6 +168,19 @@ def main(argv=None):
                 fnkey = _P(_flag(args, "--fnkey")).expanduser()
                 name = _flag(args, "--team")
                 print(team.privacy_accept(team.resolve_team(name), fnkey))
+                return 0
+            if args[:1] == ["share-card"] and len(args) >= 2 and not args[1].startswith("--"):
+                name = _flag(args, "--team")
+                print(team.share_card(team.resolve_team(name), args[1],
+                                      confirm_schema_bump="--confirm-schema-bump" in args))
+                return 0
+            if args[:1] == ["unshare-card"] and len(args) >= 2 and not args[1].startswith("--"):
+                name = _flag(args, "--team")
+                print(team.unshare_card(team.resolve_team(name), args[1]))
+                return 0
+            if args[:2] in (["memory", "on"], ["memory", "off"]):
+                name = _flag(args, "--team")
+                print(team.set_team_memory(team.resolve_team(name), args[1] == "on"))
                 return 0
             if args[:1] == ["status"]:
                 print(team.status_report())

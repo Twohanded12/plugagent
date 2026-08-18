@@ -347,6 +347,231 @@ def share(name: str, relpath: str) -> str:
     return f"shared {relpath!r} with team {name!r}"
 
 
+def share_card(name: str, card: str, confirm_schema_bump: bool = False) -> str:
+    """Promote ONE personal memory card to the team (spec §3 Flow 1)."""
+    from pa import teamcrypto, teamgit, filenames, memory
+    import subprocess
+    teamcrypto.require_age()
+    cfg = load_local(name)
+    if not cfg.get("member"):
+        raise TeamError("no member identity for this team — join first")
+    try:
+        promotion = memory.build_promotion(card)      # strips statistics; read-only
+    except ValueError as e:
+        # mirror share's "nearby:" affordance
+        nearby = [p.stem for p in sorted(memory._cards_dir().glob("*.md"))][:5] \
+            if memory._cards_dir().exists() else []
+        raise TeamError(f"no such card {card!r} ({e}) — nearby: {nearby}")
+    repo = repo_dir(name)
+    _pull_or_fail(repo)
+    meta = _read_committed_meta(repo)
+    if _local_generation(cfg) < meta["key_version"]:
+        raise TeamError(f"team rekeyed to v{meta['key_version']} — run "
+                        "`pa team rekey-accept` first, then re-share")
+    # CONSENT GATE FIRST — before ANY filesystem write. Refusing after writing the
+    # blob would leave it on disk, the retry's idempotence check would report
+    # "already up to date", and the card would never actually ship (and on a
+    # hashed team the rewritten manifest would leave a dirty tree that jams
+    # _pull_or_fail for the whole team layer).
+    needs_bump = meta["schema_version"] < 3
+    if needs_bump and not confirm_schema_bump:
+        raise TeamError(
+            "this is the first memory card on this team, which raises the repo "
+            "schema to 3 — teammates still on v0.4.0 will be locked out of the "
+            "team layer until they upgrade. Re-run with --confirm-schema-bump "
+            "to proceed.")
+    member, rel = cfg["member"], f"{card}.md"
+    manifest_path, mapping, h = None, {}, None
+    if meta["privacy"] == "hashed":
+        fnkey_file = filenames.fnkey_path(team_dir(name))
+        if not fnkey_file.exists():
+            raise TeamError("filename privacy is on for this team — get the fnkey and "
+                            "run `pa team privacy-accept --fnkey <file>` before sharing")
+        fnkey = fnkey_file.read_bytes()
+        # The HMAC input comes from filenames.hash_input — never inlined here, or
+        # share_card and _rebase_to_hashed drift into two forms of the rule (spec §2).
+        h = filenames.hmac_filename(fnkey, filenames.hash_input("memory", rel))
+        manifest_path = repo / "members" / member / "manifest.age"
+        mapping = _read_manifest(manifest_path, key_path(name),
+                                 prev_key_path(name) if prev_key_path(name).exists() else None) \
+            if manifest_path.exists() else {}
+        if mapping.get(h, rel) != rel:
+            raise TeamError(f"hash collision writing {rel!r} — refusing "
+                            "(astronomically rare; report this)")
+        dest = repo / "members" / member / "memory" / (h + ".age")
+        commit_msg = f"share-card: {h}"
+    else:
+        dest = repo / "members" / member / "memory" / (rel + ".age")
+        manifest_path = None
+        commit_msg = f"share-card: {card}"
+
+    # IDEMPOTENCE: age ciphertext is nondeterministic, so compare PLAINTEXT.
+    # On a hashed team the manifest entry must ALSO be healthy — a blob whose
+    # h -> rel mapping is missing is unresolvable by every receiver, and
+    # short-circuiting on the blob alone would never repair it.
+    manifest_ok = manifest_path is None or mapping.get(h) == rel
+    # The blob must also be TRACKED. An interrupt between dest.write_bytes and
+    # `git add` leaves an untracked, plaintext-identical blob; without this check
+    # every later run would take the shortcut and return before the add, the
+    # schema bump and the commit — a permanent, silent false "already up to
+    # date" that `pa team status` actively corroborates (it globs the working
+    # tree) and that unshare_card cannot clear (git rm fatals on an untracked
+    # path). Hashed teams are saved by manifest_ok; the plain path has nothing
+    # else to notice the half-finished write.
+    tracked = subprocess.run(
+        ["git", "-C", str(repo), "ls-files", "--error-unmatch", "--",
+         dest.relative_to(repo).as_posix()], capture_output=True).returncode == 0
+    if dest.exists() and tracked and manifest_ok:
+        try:
+            if _read_blob_plaintext(dest, name) == promotion:
+                return f"card {card!r} is already up to date on team {name!r}"
+        except teamcrypto.DecryptError:
+            pass                                       # unreadable → overwrite
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(teamcrypto.encrypt(meta["recipient"], promotion))
+    add_paths = [dest.relative_to(repo).as_posix()]
+    if manifest_path is not None:
+        mapping[h] = rel
+        _write_manifest(manifest_path, meta["recipient"], mapping)
+        add_paths.append(manifest_path.relative_to(repo).as_posix())
+
+    # FIRST promotion only (consent already obtained above): raise the schema so
+    # un-upgraded clients fail closed rather than mis-filing cards into the wiki root.
+    if needs_bump:
+        meta_path = repo / "team.json"
+        disk = json.loads(meta_path.read_text(encoding="utf-8"))
+        disk["schema_version"] = max(disk.get("schema_version", 1), 3)
+        meta_path.write_text(json.dumps(disk, indent=2) + "\n", encoding="utf-8")
+        add_paths.append("team.json")
+
+    subprocess.run(["git", "-C", str(repo), "add", "--", *add_paths],
+                   check=True, capture_output=True)
+    # Mirror share's guard: if nothing is actually staged the blob was
+    # byte-identical AND already committed — report it rather than claiming a
+    # promotion that produced no commit.
+    status = subprocess.run(["git", "-C", str(repo), "status", "--porcelain", "--", *add_paths],
+                            capture_output=True, text=True)
+    if not status.stdout.strip():
+        return f"card {card!r} is already up to date on team {name!r}"
+    subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", commit_msg],
+                   check=True, capture_output=True)
+    try:
+        teamgit.push_with_rebase(repo)
+    except (teamgit.PushError, teamgit.LeakGuardError, teamgit.GitError) as e:
+        # Concurrent FIRST promotions genuinely conflict: `share` avoids touching
+        # team.json for exactly this reason, but the schema bump must. Roll back
+        # ONLY on a real push race — LeakGuardError is raised BEFORE any push
+        # attempt and has nothing to do with a schema conflict, so rolling back
+        # there would discard the commit and report a misleading cause.
+        if needs_bump and isinstance(e, teamgit.PushError):
+            subprocess.run(["git", "-C", str(repo), "rebase", "--abort"], capture_output=True)
+            subprocess.run(["git", "-C", str(repo), "fetch", "-q"], capture_output=True)
+            subprocess.run(["git", "-C", str(repo), "reset", "--hard", "@{u}"], capture_output=True)
+            # Do NOT promise "no confirmation needed": the racing commit may have
+            # been `privacy on`, which writes max(existing, 2) — leaving a plain
+            # team at schema 2, so the retry's needs_bump is still True and the
+            # consent gate correctly refuses again.
+            return (f"another member changed team.json first — re-run "
+                    f"`pa team share-card {card}`")
+        return f"promoted {card!r} locally; push failed ({e}) — will retry on next sync"
+    # Residual rekey-vs-push race (mirrors share, team.py:328-340). push_with_rebase
+    # cleanly absorbs a rekey that lands between our gate and this push — those
+    # commits touch disjoint paths — but the blob we just pushed is then encrypted
+    # to the OLD generation, and the rekey's _reencrypt_namespace has already run,
+    # so nothing will ever rotate it. Teammates would lose the card the moment
+    # team.key.prev is dropped. Surface it so the user re-shares.
+    try:
+        pushed_gen = _read_committed_meta(repo)["key_version"]
+    except TeamError:
+        pushed_gen = _local_generation(cfg)   # can't assess; don't sink a completed push
+    if _local_generation(cfg) < pushed_gen:
+        raise TeamError("team rekeyed during share-card — your card was pushed but "
+                        "under the old generation; run rekey-accept and re-share it "
+                        "to supersede that copy")
+    sync(name, force=True)
+    return (f"promoted card {card!r} to team {name!r} (usage statistics were stripped; "
+            "your personal card is unchanged)")
+
+
+def unshare_card(name: str, card: str) -> str:
+    """Withdraw a promoted card from this member's namespace (spec §3 Flow 2).
+
+    Deliberately needs NO fnkey: on a hashed team the member finds their own `h`
+    by reverse-lookup in their OWN manifest (age key only), so a member who never
+    accepted filename privacy can still withdraw."""
+    from pa import teamcrypto, teamgit
+    import subprocess
+    teamcrypto.require_age()
+    cfg = load_local(name)
+    if not cfg.get("member"):
+        raise TeamError("no member identity for this team — join first")
+    repo = repo_dir(name)
+    _pull_or_fail(repo)
+    meta = _read_committed_meta(repo)
+    # Generation gate, as share/share_card have. Without it a member who has not
+    # accepted a re-key would rewrite their manifest to the NEW recipient while
+    # still holding the OLD key — jumping their manifest a generation ahead of
+    # their own blobs, after which every later hashed operation of theirs raises
+    # a raw DecryptError. Withdrawal stays possible, just after accepting.
+    if _local_generation(cfg) < meta["key_version"]:
+        raise TeamError(f"team rekeyed to v{meta['key_version']} — run "
+                        "`pa team rekey-accept` first, then withdraw the card")
+    member, rel = cfg["member"], f"{card}.md"
+    mem_root = repo / "members" / member / "memory"
+    manifest_path = repo / "members" / member / "manifest.age"
+    target, drop_h, mapping = None, None, None
+
+    if meta["privacy"] == "hashed" and manifest_path.exists():
+        prev = prev_key_path(name)
+        mapping = _read_manifest(manifest_path, key_path(name),
+                                 prev if prev.exists() else None)
+        # reverse-lookup by VALUE, restricted to blobs that actually sit in the
+        # memory root — a wiki page may share the same root-relative value.
+        for h, value in list(mapping.items()):
+            if value == rel and (mem_root / (h + ".age")).exists():
+                target, drop_h = mem_root / (h + ".age"), h
+                break
+    else:
+        candidate = mem_root / (rel + ".age")
+        if candidate.exists():
+            target = candidate
+
+    if target is None:
+        raise TeamError(f"card {card!r} is not shared with team {name!r}")
+    # git rm FIRST: if it fails, nothing has been written, so no dirty tree is
+    # left behind to jam _pull_or_fail for the whole team layer.
+    rm = subprocess.run(["git", "-C", str(repo), "rm", "-q", "--",
+                         target.relative_to(repo).as_posix()], capture_output=True, text=True)
+    if rm.returncode != 0:
+        raise TeamError(f"could not remove the card blob: {teamgit._first_line(rm.stderr)}")
+    # From here the rm is STAGED. Any failure below must reset, or the staged
+    # deletion jams _pull_or_fail for the whole team layer — and the message it
+    # prints ("git checkout -- .") does NOT clear a staged deletion, so the user
+    # would be handed recovery guidance that silently does nothing.
+    try:
+        if drop_h is not None:                   # hashed: now drop the manifest entry
+            del mapping[drop_h]
+            _write_manifest(manifest_path, meta["recipient"], mapping)
+            subprocess.run(["git", "-C", str(repo), "add", "--",
+                            manifest_path.relative_to(repo).as_posix()],
+                           check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m",
+                        f"unshare-card: {card}"], check=True, capture_output=True)
+    except Exception as e:
+        subprocess.run(["git", "-C", str(repo), "reset", "-q", "--hard", "HEAD"],
+                       capture_output=True)
+        raise TeamError(f"could not withdraw {card!r} ({e}) — nothing was changed")
+    try:
+        teamgit.push_with_rebase(repo)
+    except (teamgit.PushError, teamgit.LeakGuardError, teamgit.GitError) as e:
+        return f"withdrew {card!r} locally; push failed ({e}) — will retry on next sync"
+    sync(name, force=True)
+    return (f"withdrew card {card!r} from team {name!r}. This stops FUTURE access "
+            "only — anyone who already cloned the repository keeps the old "
+            "ciphertext from its history.")
+
+
 def sync(name, force: bool = False) -> str:
     from pa import teamcrypto, teamgit
     cfg = load_local(name)
@@ -405,6 +630,16 @@ def sync(name, force: bool = False) -> str:
         leaf = Path(rel).name
         if leaf == "manifest.age":
             continue                        # handled above, never a cache page
+        # Root comes from the git DIRECTORY, never from manifest contents
+        # (spec §4 invariant 6). Guard the index like the member guard above:
+        # changed_age_files' ls-files baseline can return a repo-root stray.
+        # Ordered AFTER the manifest.age skip on purpose: members/<m>/manifest.age
+        # has parts[2] == "manifest.age", so checking first would make every
+        # hashed member's manifest a counted failure that retries every sync.
+        root = parts[2] if len(parts) > 2 else None
+        if root not in filenames.SHARED_ROOTS:
+            failures.append(rel)                # counted, never cached
+            continue
         hashed_member = (repo / "members" / (member or "") / "manifest.age").exists() \
             if member else False
         if hashed_member and status == "D":
@@ -424,8 +659,15 @@ def sync(name, force: bool = False) -> str:
                 # / a race) → skip-don't-poison, resolves next sync
                 failures.append(rel)
                 continue
-            if (Path(real).is_absolute() or ".." in Path(real).parts
-                    or "\x00" in real or not Path(real).parts):
+            if (not isinstance(real, str) or Path(real).is_absolute()
+                    or ".." in Path(real).parts or "\x00" in real
+                    or not Path(real).parts):
+                # isinstance FIRST: bytes_to_manifest only checks that the JSON is
+                # an object, so a value like 12345 would raise TypeError inside
+                # Path() before any of the checks below could fire — crashing sync
+                # mid-loop, which leaves last_synced_commit unadvanced so the very
+                # next sync re-reads the same manifest and dies again, forever, for
+                # every member.
                 # A manifest value is content written by whichever member owns
                 # that namespace, so it must be validated before it is joined
                 # onto a local path. Left unchecked:
@@ -438,9 +680,14 @@ def sync(name, force: bool = False) -> str:
                 # The last three matter doubly because sync() is contractually
                 # soft-failing: one bad entry from any teammate would otherwise
                 # crash sync permanently for every member.
+                # NUL also matters for hash_input: its domain separation is only
+                # provably disjoint for filesystem-derived rels, and a value of
+                # "memory\x00notes.md" in the wiki root would otherwise hash
+                # identically to a memory card named notes.
                 failures.append(rel)
                 continue
-            dest = cache_dir(name) / "members" / member / "wiki" / real
+            # Root from the blob's DIRECTORY, never from the manifest value.
+            dest = cache_dir(name) / "members" / member / root / real
         else:
             # plain member (existing logic), including plain D-handling below
             dest = cache_dir(name) / rel[: -len(".age")]
@@ -488,7 +735,8 @@ def sync(name, force: bool = False) -> str:
             dest.unlink()
         dest.write_bytes(data)
         written += 1
-    _remove_cache_orphans(name, manifests)
+    live = _live_pairs(name, manifests)
+    _remove_cache_orphans(name, manifests, live)
     _rebuild_index(name)
     cfg["last_sync"] = time.time()
     cfg["last_synced_commit"] = teamgit.head_commit(repo)
@@ -560,46 +808,53 @@ def _pull_or_fail(repo: Path) -> None:
 
 def _reencrypt_namespace(repo: Path, member: str, new_key: Path,
                          prev_key: Path, new_recipient: str) -> list[str]:
-    """Re-encrypt every .age under members/<member>/wiki/ from prev_key to new_recipient.
+    """Re-encrypt every .age under members/<member>/<root>/ — for every root in
+    filenames.SHARED_ROOTS — from prev_key to new_recipient.
 
     Idempotent: a blob that already decrypts under new_key is this generation
     and is skipped. A blob that decrypts under neither is corrupt/unknown —
     skipped and counted (never modified, so the original is never lost).
     Writes are atomic (temp file + os.replace).
 
+    Re-keying is content-only (no rename), so it needs no hash_input: it never
+    computes a filename. It only has to WALK every shared root, or a root's
+    blobs stay sealed to a retired key.
+
     The caller MUST keep prev_key available until this returns cleanly — a
     crash-resume re-run needs it to rotate still-old-generation blobs;
     retiring prev_key on a partial run strands them as failures."""
     import os
     from pa import teamcrypto
-    base = repo / "members" / member / "wiki"
+    from pa import filenames
     failures = []
-    if not base.exists():
-        return failures
-    for age_file in sorted(base.rglob("*.age")):
-        if age_file.is_symlink():
-            # mirror sync()'s guard: never read through a symlink here either
-            # — the target could be anything outside the repo.
-            failures.append(str(age_file.relative_to(repo)))
+    for root in filenames.SHARED_ROOTS:
+        base = repo / "members" / member / root
+        if not base.exists():
             continue
-        blob = age_file.read_bytes()
-        try:
-            teamcrypto.decrypt(new_key, blob)
-            continue                              # already this generation
-        except teamcrypto.DecryptError:
-            pass
-        try:
-            data = teamcrypto.decrypt(prev_key, blob)
-        except teamcrypto.DecryptError:
-            failures.append(str(age_file.relative_to(repo)))
-            continue
-        new_blob = teamcrypto.encrypt(new_recipient, data)
-        tmp = age_file.with_name(age_file.name + ".tmp")
-        tmp.write_bytes(new_blob)
-        os.replace(tmp, age_file)                 # atomic
+        for age_file in sorted(base.rglob("*.age")):
+            if age_file.is_symlink():
+                # mirror sync()'s guard: never read through a symlink here either
+                # — the target could be anything outside the repo.
+                failures.append(str(age_file.relative_to(repo)))
+                continue
+            blob = age_file.read_bytes()
+            try:
+                teamcrypto.decrypt(new_key, blob)
+                continue                              # already this generation
+            except teamcrypto.DecryptError:
+                pass
+            try:
+                data = teamcrypto.decrypt(prev_key, blob)
+            except teamcrypto.DecryptError:
+                failures.append(str(age_file.relative_to(repo)))
+                continue
+            new_blob = teamcrypto.encrypt(new_recipient, data)
+            tmp = age_file.with_name(age_file.name + ".tmp")
+            tmp.write_bytes(new_blob)
+            os.replace(tmp, age_file)                 # atomic
 
     # Also rotate the per-member manifest (spec §4 / round-1 CRIT #1). It lives
-    # ABOVE wiki/, so the rglob above never sees it. Same idempotent contract:
+    # ABOVE the roots, so the rglobs above never see it. Same idempotent contract:
     # if it already opens under new_key it's this generation → skip.
     manifest = repo / "members" / member / "manifest.age"
     if manifest.exists() and not manifest.is_symlink():
@@ -649,11 +904,29 @@ def _read_manifest(path: Path, key: Path, prev_key) -> dict:
     return filenames.bytes_to_manifest(data)
 
 
+def _read_blob_plaintext(path: Path, name: str) -> bytes:
+    """Decrypt a repo blob with the current key, falling back to team.key.prev
+    (the same two-key transition fallback _read_manifest uses). Raises
+    DecryptError when neither opens it (callers decide what that means)."""
+    from pa import teamcrypto
+    blob = path.read_bytes()
+    try:
+        return teamcrypto.decrypt(key_path(name), blob)
+    except teamcrypto.DecryptError:
+        prev = prev_key_path(name)
+        if prev.exists():
+            return teamcrypto.decrypt(prev, blob)
+        raise
+
+
 def _rebase_to_hashed(repo: Path, member: str, fnkey: bytes, recipient: str,
                       key: Path, prev_key) -> dict:
-    """Rename every plaintext page under members/<member>/wiki/ to its hashed
-    name (git mv — content blob unchanged) and write members/<member>/manifest.age.
-    Returns the {hash: relpath} map.
+    """Rename every plaintext blob under members/<member>/<root>/ — for every
+    root in filenames.SHARED_ROOTS — to its hashed name (git mv — content blob
+    unchanged) and write members/<member>/manifest.age.
+    Returns the {hash: relpath} map, whose values stay ROOT-RELATIVE: the root
+    is recoverable from the directory the hashed file lives in, so it never
+    needs to be (and must never be) taken from manifest contents.
 
     IDEMPOTENT: the map is SEEDED from the existing manifest.age (if present)
     before the walk, so entries for pages already hashed by a prior partial run
@@ -669,8 +942,10 @@ def _rebase_to_hashed(repo: Path, member: str, fnkey: bytes, recipient: str,
             mapping = _read_manifest(manifest, key, prev_key)      # seed (survive resume)
         except Exception:
             mapping = {}                                           # unreadable → rebuild fresh
-    base = repo / "members" / member / "wiki"
-    if base.exists():
+    for root in filenames.SHARED_ROOTS:
+        base = repo / "members" / member / root
+        if not base.exists():
+            continue
         for age_file in sorted(base.rglob("*.age")):
             if age_file.is_symlink():
                 continue
@@ -680,13 +955,19 @@ def _rebase_to_hashed(repo: Path, member: str, fnkey: bytes, recipient: str,
             rel = age_file.relative_to(base).as_posix()
             assert rel.endswith(".age")
             rel = rel[: -len(".age")]                              # e.g. "concepts/auth.md"
-            h = filenames.hmac_filename(fnkey, rel)
+            # The root comes from the DIRECTORY we are walking, and the HMAC
+            # input from filenames.hash_input — never inlined here, or this
+            # becomes a third drifting form of the rule (spec §2).
+            h = filenames.hmac_filename(fnkey, filenames.hash_input(root, rel))
+            if mapping.get(h, rel) != rel:      # backstop; unreachable with NUL separation
+                raise TeamError(f"hash collision rebasing {root}/{rel!r} — refusing "
+                                "(astronomically rare; report this)")
             dest = base / (h + ".age")
             subprocess.run(["git", "-C", str(repo), "mv",
                             str(age_file.relative_to(repo).as_posix()),
                             str(dest.relative_to(repo).as_posix())],
                            check=True, capture_output=True)
-            mapping[h] = rel
+            mapping[h] = rel                                       # value stays root-relative
     manifest.parent.mkdir(parents=True, exist_ok=True)
     _write_manifest(manifest, recipient, mapping)
     return mapping
@@ -1100,7 +1381,9 @@ def privacy_on(name: str) -> str:
     meta_path = repo / "team.json"
     disk = json.loads(meta_path.read_text(encoding="utf-8"))
     disk["privacy"] = "hashed"
-    disk["schema_version"] = 2
+    # MONOTONIC: a share-card → privacy-on order must not downgrade a schema-3
+    # repo back to 2 (which would strand every already-shared memory card).
+    disk["schema_version"] = max(disk.get("schema_version", 1), 2)
     meta_path.write_text(json.dumps(disk, indent=2) + "\n", encoding="utf-8")
 
     # Stage: git mv already staged the renames. The manifest is UNTRACKED on the
@@ -1162,8 +1445,12 @@ def _validate_fnkey(repo: Path, fnkey: bytes, key: Path, prev_key) -> str:
                 continue
             for h, rel in mapping.items():
                 saw_a_page = True
-                if filenames.hmac_filename(fnkey, rel) == h:
-                    return "ok"
+                # A manifest value is root-relative and carries no root, so try
+                # every shared root's hash input before calling it a mismatch —
+                # a memory-only manifest would otherwise look like a wrong fnkey.
+                for root in filenames.SHARED_ROOTS:
+                    if filenames.hmac_filename(fnkey, filenames.hash_input(root, rel)) == h:
+                        return "ok"
     if saw_a_page:
         raise TeamError("this fnkey isn't this team's — ask whoever enabled "
                         "privacy for the current fnkey")
@@ -1237,45 +1524,79 @@ def privacy_accept(name: str, received_fnkey: Path) -> str:
             "sent; it now lives in your PlugAgent config." + warn)
 
 
-def _remove_cache_orphans(name: str, manifests: dict) -> None:
+def _live_pairs(name: str, manifests: dict) -> dict:
+    """{member: {(root, rel), …}} from a FULL enumeration of the repo.
+
+    NOT built from sync's changed+retry loop, which is incremental — a live-set
+    from there would omit every unchanged page and the sweep would delete it on
+    the second sync (spec §3 "Where the live-set comes from")."""
+    from pa import filenames
+    repo = repo_dir(name)
+    # NOTE: values here are NOT run through sync's traversal/NUL/empty guard.
+    # That is safe only because this set is compared against disk-derived rels,
+    # which can never contain "..". A future consumer that JOINS a live value
+    # onto a path must validate it first.
+    live = {}
+    members_root = repo / "members"
+    if not members_root.exists():
+        return live
+    for m_dir in sorted(members_root.iterdir()):
+        pairs = set()
+        for root in filenames.SHARED_ROOTS:
+            base = m_dir / root
+            if not base.exists():
+                continue
+            for age_file in sorted(base.rglob("*.age")):
+                leaf = age_file.name
+                rel = age_file.relative_to(base).as_posix()
+                if filenames.is_hashed_age(leaf):
+                    # Reverse-map through the manifest (age key only, NOT the
+                    # fnkey) — a reader without an fnkey still resolves the real
+                    # path. An unresolvable <h> contributes nothing; the sweep's
+                    # skip-don't-poison guard is what protects that member's
+                    # cache, never this set.
+                    real = manifests.get(m_dir.name, {}).get(leaf[: -len(".age")])
+                    if real is None:
+                        continue
+                    pairs.add((root, real))
+                else:
+                    pairs.add((root, rel[: -len(".age")]))
+        live[m_dir.name] = pairs
+    return live
+
+
+def _remove_cache_orphans(name: str, manifests: dict, live: dict) -> None:
     repo, cache = repo_dir(name), cache_dir(name)
     if not cache.exists():
         return
+    from pa import filenames
     for cached in cache.rglob("*.md"):
         if cached.name == "index.md" and cached.parent == cache:
             continue
-        rel = cached.relative_to(cache)                    # members/<m>/wiki/<real>.md
-        parts = rel.parts
-        member = parts[1] if len(parts) > 2 and parts[0] == "members" else None
+        parts = cached.relative_to(cache).parts    # members/<m>/<root>/<rel…>
+        # Intentional: cache entries outside members/<m>/<root>/ are not produced
+        # by any current write path, so skipping them is a no-op in practice.
+        if len(parts) < 4 or parts[0] != "members":
+            continue
+        member, root = parts[1], parts[2]
+        if root not in filenames.SHARED_ROOTS:
+            continue
         # A member is HASHED iff their manifest.age exists in the repo — NOT iff
-        # it decrypted this run (plan-review Critical #2). Deciding by the
-        # decrypted `manifests` dict would drop a hashed member whose manifest
-        # transiently failed to decrypt (e.g. a v1 reader during a v2 re-key
-        # window) into the plain branch, whose repo/(rel+".age") check never
-        # matches a hashed layout → it would delete the last-good cache every
-        # sync, violating skip-don't-poison.
-        hashed = bool(member) and (repo / "members" / member / "manifest.age").exists()
-        if hashed:
-            if member not in manifests:
-                # manifest present but undecryptable this run → keep last-good,
-                # never sweep (skip-don't-poison).
-                continue
-            # live iff some manifest entry maps to this real path. Reverse-map
-            # via the manifest (age key only, NOT the fnkey).
-            wiki_rel = Path(*parts[3:]).as_posix() if len(parts) > 3 else ""
-            if wiki_rel not in set(manifests[member].values()):
-                cached.unlink()
-        else:
-            # plain member (existing logic): live iff its <rel>.age is present.
-            # A symlinked src (even a broken one) means the decrypt loop above
-            # already saw it and recorded a decrypt failure for it — that's the
-            # "skip, don't poison" contract: keep the last-good cached copy.
-            # src.exists() alone would follow the link and report False for a
-            # broken target, causing the sweep to delete the very copy the sync
-            # summary just claimed was kept.
-            src = repo / (str(rel) + ".age")
-            if not (src.exists() or src.is_symlink()):
-                cached.unlink()
+        # it decrypted this run (plan-review Critical #2).
+        _man = repo / "members" / member / "manifest.age"
+        # exists() FOLLOWS symlinks, so a broken symlinked manifest would read as
+        # "plain" and drop this member out of skip-don't-poison below, wiping
+        # their whole cached namespace. Treat any manifest entry — link or not —
+        # as hashed.
+        hashed = _man.exists() or _man.is_symlink()
+        if hashed and member not in manifests:
+            # Phase 4 skip-don't-poison: a manifest that did not decrypt this run
+            # means keep last-good, NEVER sweep (a live-set alone would wipe the
+            # whole namespace during a re-key window).
+            continue
+        rel = Path(*parts[3:]).as_posix()
+        if (root, rel) not in live.get(member, set()):
+            cached.unlink()
 
 
 def _rebuild_index(name: str) -> None:
@@ -1287,6 +1608,8 @@ def _rebuild_index(name: str) -> None:
         if page.parent == cache and page.name == "index.md":
             continue
         rel = page.relative_to(cache)
+        if len(rel.parts) > 2 and rel.parts[0] == "members" and rel.parts[2] != "wiki":
+            continue          # memory cards are NOT shared pages (spec §4 invariant 7)
         member = rel.parts[1] if len(rel.parts) > 2 and rel.parts[0] == "members" else "?"
         m = _re.search(r"^description:\s*(.+)$", page.read_text(encoding="utf-8"),
                        _re.M)
@@ -1310,6 +1633,94 @@ def _format_sync_age(last: float, now=None) -> str:
     return f"{days} day{'s' if days != 1 else ''} ago"
 
 
+def cards_for_index() -> list:
+    """Team cards for memory.rebuild_index's fold-in, across every configured team.
+
+    Skips a team whose LOCAL team.json has team_memory == false (the receiver's
+    off switch — local-only, so the team never learns who opted out). Never
+    raises: a missing cache, unreadable card or absent team yields [] / a skip."""
+    out = []
+    for name in list_teams():
+        try:
+            cfg = load_local(name)
+        except (TeamError, OSError, UnicodeDecodeError):
+            continue                      # unreadable/corrupt local config — skip
+        if not isinstance(cfg, dict):
+            continue                      # team.json holding a non-object
+        if cfg.get("team_memory") is False:
+            continue
+        members_root = cache_dir(name) / "members"
+        if not members_root.exists():
+            continue
+        for m_dir in sorted(members_root.iterdir()):
+            mem_root = m_dir / "memory"
+            if not mem_root.is_dir():
+                continue
+            for card in sorted(mem_root.rglob("*.md")):
+                try:
+                    text = card.read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError):
+                    continue                      # skip, never break the index
+                meta = {}
+                # ANCHORED (re.match) and NON-GREEDY: the FIRST "\n---\n" closes
+                # the block, so a crafted body cannot inject frontmatter keys.
+                m = re.match(r"---\n(.*?)\n---\n?", text, re.S)
+                if m:
+                    for line in m.group(1).splitlines():
+                        if ":" in line:
+                            k, v = line.split(":", 1)
+                            meta[k.strip()] = v.strip()
+                out.append({"name": meta.get("name", card.stem),
+                            "description": meta.get("description", ""),
+                            "member": m_dir.name, "team": name,
+                            "path": str(card)})     # exact source, for Task 12
+    return out
+
+
+def card_bodies_for_lookup() -> list:
+    """Like cards_for_index but with bodies, for memory.show/recall fallback.
+    Read-only: never writes, never bumps a counter.
+
+    Built ON TOP of cards_for_index so the off switch, the memory-root scoping
+    and the parse skipping are inherited rather than re-implemented (a second
+    copy would drift, and the off switch is the one that must never drift).
+
+    Uses the `path` each entry already carries — reconstructing it from the
+    frontmatter `name` would miss any card whose name differs from its filename,
+    and worse, would let a sender-controlled `name:` steer the read."""
+    out = []
+    for c in cards_for_index():          # reuses the off-switch + parse skipping
+        try:
+            text = Path(c["path"]).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        body = re.sub(r"^---\n.*?\n---\n?", "", text, flags=re.S).strip()
+        out.append({**c, "body": body})
+    return out
+
+
+def set_team_memory(name: str, on: bool) -> str:
+    """Flip the receiver's team-card fold-in (the switch cards_for_index reads).
+
+    Writes the LOCAL team.json ONLY — never the repo's. The repo copy is shared
+    state, so recording an opt-out there would tell the whole team who stopped
+    reading their cards; the decision is the receiver's alone (spec §3)."""
+    cfg = load_local(name)
+    cfg["team_memory"] = bool(on)
+    save_local(name, cfg)
+    # Rebuild the hot index NOW. MEMORY.md is what a session reads at start-up,
+    # and rebuild_index is its only writer — without this the switch would not
+    # take effect until the next unrelated memory operation, so a user who
+    # turned team cards OFF would still see them in their next session.
+    try:
+        from pa import memory
+        memory.rebuild_index()
+    except Exception:
+        pass          # the toggle itself is saved; a rebuild failure must not undo it
+    return (f"team memory {'on' if on else 'off'} for team {name!r} "
+            "(local only — teammates are not told)")
+
+
 def status_report() -> str:
     teams = list_teams()
     if not teams:
@@ -1318,8 +1729,32 @@ def status_report() -> str:
     for name in teams:
         try:
             cfg = load_local(name)
-            cache_pages = len(list(cache_dir(name).rglob("*.md"))) - 1 \
-                if (cache_dir(name) / "index.md").exists() else 0
+
+            def _in_root(p, root):
+                parts = p.relative_to(cache_dir(name)).parts
+                return len(parts) > 2 and parts[0] == "members" and parts[2] == root
+
+            # "cached pages" is a WIKI-only count: a card counted here would be
+            # double-counted under `team cards:` below (spec §4 invariant 7).
+            cache_pages = 0
+            received = 0
+            if cache_dir(name).exists():
+                for p in cache_dir(name).rglob("*.md"):
+                    if _in_root(p, "wiki"):
+                        cache_pages += 1
+                    elif _in_root(p, "memory"):
+                        received += 1
+            # "shared" = cards in MY OWN repo namespace (what I promoted)
+            # Guard the member name: pathlib collapses an empty component, so a
+            # not-joined config would resolve to repo/members/memory and count a
+            # member literally named "memory" as our own shared cards.
+            shared = 0
+            if cfg.get("member"):
+                own_mem = repo_dir(name) / "members" / cfg["member"] / "memory"
+                shared = len(list(own_mem.glob("*.age"))) if own_mem.exists() else 0
+            cardline = f"team cards: {shared} shared / {received} received"
+            if cfg.get("team_memory") is False:
+                cardline += " (team memory off)"
             age = _format_sync_age(cfg.get("last_sync", 0))
             unpushed = len(teamgit.unpushed_files(repo_dir(name))) \
                 if repo_dir(name).exists() else 0
@@ -1346,7 +1781,7 @@ def status_report() -> str:
             lines.append(
                 f"{name} — member: {cfg.get('member') or '(not joined)'}, "
                 f"{keyline}, {privline}, last sync: {age}, cached pages: {cache_pages}, "
-                f"unpushed files: {unpushed}, "
+                f"{cardline}, unpushed files: {unpushed}, "
                 f"decrypt failures: {len(cfg.get('decrypt_failures', []))}")
         except TeamError as e:
             lines.append(f"{name} — ERROR: {e}")

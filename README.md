@@ -1,11 +1,12 @@
 # PlugAgent
 
-> **Status:** v0.4 — personal use plus opt-in, end-to-end-encrypted team
+> **Status:** v0.5 — personal use plus opt-in, end-to-end-encrypted team
 > sharing of the wiki layer, with re-key automation for rotating a compromised
-> or departing-member team key and now opt-in filename privacy that hides page
-> paths from the host. Page content is encrypted at rest; with privacy on,
-> paths are hidden too, but member names, page counts, and commit times remain
-> visible — see [Team mode](#team-mode-v04).
+> or departing-member team key, opt-in filename privacy that hides page paths
+> from the host, and now explicit, per-card sharing of personal memory cards.
+> Page content is encrypted at rest; with privacy on, paths are hidden too, but
+> member names, page counts, and commit times remain visible — see
+> [Team mode](#team-mode-v05).
 
 PlugAgent is a personal agent that learns you and records your work, running
 entirely as a Claude Code plugin. While you work in normal Claude Code
@@ -109,6 +110,10 @@ can open in any editor or Obsidian:
 Controls (the `pa` CLI is `python3 scripts/pa` from this repository, or the
 plugin's installed copy — your agent runs these for you when asked):
 
+- **Nothing leaves by default.** Raw sessions never leave your machine;
+  personal memory cards never leave unless you explicitly promote one to a team
+  (`pa team share-card <card-name>`, one named card at a time — see
+  [Team mode](#team-mode-v05)).
 - **Raw is immutable to the agent.** Sessions are appended, never edited. The
   one sanctioned deletion path is an explicit request — "delete that
   session" — which runs `pa raw forget <session-id>` after confirming the
@@ -123,13 +128,14 @@ plugin's installed copy — your agent runs these for you when asked):
   `~/.plugagent/state/`. Capture failures never break your session — they
   are logged and surfaced as a one-line notice on the next wake.
 
-## Team mode (v0.4)
+## Team mode (v0.5)
 
 Opt-in: a small group can share **distilled wiki pages** through a private git
 repository, encrypted end-to-end with [age](https://github.com/FiloSottile/age).
 Each member owns a namespace in the repo, writes only into their own, and reads
-everyone's — with attribution — in recall. Raw sessions and memory cards never
-leave your machine. Team mode is the only feature that needs `age`
+everyone's — with attribution — in recall. **Raw sessions never leave your
+machine; personal memory cards never leave unless you explicitly promote one**
+(see below). Team mode is the only feature that needs `age`
 (`brew install age`); personal mode stays dependency-free.
 
 ```
@@ -156,6 +162,18 @@ run `pa team privacy-accept --fnkey <file>` to opt in. The team is fully
 path-hidden only once **every member accepts** (convergence); un-accepted
 members keep plaintext names until they do.
 
+**Opt-in memory-card sharing.** Personal memory cards stay local by default and
+are never bulk-synced. You can promote **one card at a time** with
+`pa team share-card <card-name>` — your agent never picks a card for you. The
+promoted copy carries only the card's name, description, type and body: usage
+statistics (`uses`, `last_used`) are stripped, because a per-card use counter
+with a date would leak when you work. Your original card is untouched.
+Teammates' promoted cards fold into your hot index as a read-only, attributed
+section; a card of your own with the same name always wins. Turn the whole
+section off with `pa team memory off` (local only — the team is not told), and
+take a card back with `pa team unshare-card <card-name>` (forward-only, like a
+re-key: already-cloned history keeps the old ciphertext).
+
 **Honesty note:** page *content* is encrypted at rest. With filename privacy on,
 page *paths* are hidden too — but *metadata* that stays visible to whoever hosts
 the repo is member names, page counts/sizes, and commit times, and privacy does
@@ -165,12 +183,14 @@ are in [`docs/team-guide.md`](docs/team-guide.md).
 
 ## Roadmap
 
-Team sharing of the wiki layer, re-key automation (`pa team rekey` /
-`pa team rekey-accept` — forward-secrecy only), and opt-in filename privacy
-(`pa team privacy on` / `pa team privacy-accept` — hides page paths from the
-host) have all landed (see above). Still ahead: memory-card sharing. Raw
-transcripts never leave your machine. Verification records for the current
-release live in [`docs/verification/`](docs/verification/).
+The roadmap is complete: team sharing of the wiki layer, re-key automation
+(`pa team rekey` / `pa team rekey-accept` — forward-secrecy only), opt-in
+filename privacy (`pa team privacy on` / `pa team privacy-accept` — hides page
+paths from the host), and opt-in memory-card sharing (`pa team share-card` /
+`pa team unshare-card` / `pa team memory off`) have all landed (see above).
+Raw transcripts never leave your machine, and they never will — sharing them is
+an explicit non-goal. Verification records for the current release live in
+[`docs/verification/`](docs/verification/).
 
 ## License
 

@@ -1,6 +1,8 @@
+import subprocess
+
 import pytest
 from pathlib import Path
-from pa import config, team
+from pa import config, team, teamgit
 from tests.team_helpers import fake_crypto, make_remote
 
 
@@ -85,3 +87,38 @@ def env_privacy_on_no_pages(monkeypatch, tmp_path):
     _home(monkeypatch, tmp_path, "B")
     team.join_team(str(remote), key_v1, "bob")
     return {"name": "acme", "fnkey_file": fnkey_file, "tmp": tmp_path}
+
+
+@pytest.fixture
+def two_member_memory_env(monkeypatch, tmp_path):
+    """HASHED team. alice has a promoted card `lint` in members/alice/memory/
+    (seeded directly, since share_card lands in Task 9) plus a wiki page, and has
+    turned filename privacy ON — so the card is stored as <h>.age with a manifest
+    entry and the hashed code paths are exercised. bob has joined and holds NO
+    fnkey; join_team ends with a full sync, so bob's cache is already populated.
+    Leaves home = bob."""
+    fake_crypto(monkeypatch)
+    remote = make_remote(tmp_path)
+    _home(monkeypatch, tmp_path, "L")
+    team.init_team("acme", str(remote), "alice")
+    write_wiki_page("concepts/auth.md", "JWT", "wiki body")
+    team.share("acme", "concepts/auth.md")
+    repo = team.repo_dir("acme")
+    meta = team._read_committed_meta(repo)
+    from pa import teamcrypto
+    card = repo / "members" / "alice" / "memory" / "lint.md.age"
+    card.parent.mkdir(parents=True, exist_ok=True)
+    card.write_bytes(teamcrypto.encrypt(
+        meta["recipient"],
+        b"---\nname: lint\ndescription: Run the linter\ntype: feedback\n---\n\nbody\n"))
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "seed card"],
+                   check=True, capture_output=True)
+    teamgit.push_with_rebase(repo)
+    team.privacy_on("acme")           # HASHED — see the callout above
+    key_v1 = tmp_path / "key-v1"; shutil.copy(team.key_path("acme"), key_v1)
+    _home(monkeypatch, tmp_path, "B")
+    team.join_team(str(remote), key_v1, "bob")     # ends with a full sync
+    return {"name": "acme", "remote": remote, "tmp": tmp_path,
+            "as_leader": lambda: _home(monkeypatch, tmp_path, "L"),
+            "as_bob": lambda: _home(monkeypatch, tmp_path, "B")}

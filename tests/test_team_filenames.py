@@ -56,3 +56,58 @@ def test_manifest_to_bytes_is_canonical_sorted():
 def test_bytes_to_manifest_rejects_non_object():
     with pytest.raises(ValueError):
         fn.bytes_to_manifest(b"[]")
+
+
+def test_shared_roots_are_wiki_and_memory():
+    assert fn.SHARED_ROOTS == ("wiki", "memory")
+
+
+def test_hash_input_wiki_is_the_bare_rel_for_0_4_0_compat():
+    # wiki entries must hash EXACTLY as they did in 0.4.0, or every existing
+    # hashed team's filenames become unresolvable.
+    assert fn.hash_input("wiki", "concepts/auth.md") == "concepts/auth.md"
+
+
+def test_hash_input_memory_is_nul_separated():
+    assert fn.hash_input("memory", "lint.md") == "memory\x00lint.md"
+
+
+def test_hash_input_domain_separation_is_injective():
+    # The collision the "memory/" prefix scheme would have: a legitimate wiki
+    # page at wiki/memory/notes.md vs a memory card named notes.
+    wiki_page = fn.hash_input("wiki", "memory/notes.md")
+    memory_card = fn.hash_input("memory", "notes.md")
+    assert wiki_page != memory_card
+    assert fn.hmac_filename(b"\x11" * 32, wiki_page) != \
+        fn.hmac_filename(b"\x11" * 32, memory_card)
+
+
+def test_hash_input_nul_cannot_come_from_a_real_path(tmp_path):
+    # NUL is the separator precisely because the OS refuses it in a filename, so
+    # no rel walked off disk can forge a memory-form input. This asserts the
+    # platform premise the disjointness proof rests on, not a Python literal.
+    with pytest.raises(ValueError):                 # rejected before the syscall
+        (tmp_path / "memory\x00notes.md").write_text("x")
+    page = tmp_path / "memory" / "notes.md"
+    page.parent.mkdir()
+    page.write_text("x")
+    rel = page.relative_to(tmp_path).as_posix()     # "memory/notes.md"
+    assert "\x00" not in rel
+    assert fn.hash_input("wiki", rel) != fn.hash_input("memory", "notes.md")
+
+
+@pytest.mark.parametrize("bad", [12345, None, ["a"], {"a": 1}, True])
+def test_bytes_to_manifest_rejects_non_string_values(bad):
+    # Each of these kills a different consumer if it gets through: Path() raises
+    # TypeError, set.add() raises unhashable, .encode() raises AttributeError.
+    import json as _json
+    blob = _json.dumps({"a" * 32: bad}).encode("utf-8")
+    with pytest.raises(ValueError, match="strings"):
+        fn.bytes_to_manifest(blob)
+
+
+def test_bytes_to_manifest_accepts_a_normal_manifest():
+    import json as _json
+    m = {"a" * 32: "concepts/auth.md"}
+    assert fn.bytes_to_manifest(_json.dumps(m).encode("utf-8")) == m
+

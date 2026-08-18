@@ -104,3 +104,15 @@ def test_reencrypt_manifest_is_idempotent(tmp_path, monkeypatch):
     before = (ns / "manifest.age").read_bytes()
     team._reencrypt_namespace(repo, "alice", new_key=k2, prev_key=k2, new_recipient=r2)
     assert (ns / "manifest.age").read_bytes() == before
+
+
+def test_reencrypt_rotates_the_memory_root(tmp_path, monkeypatch):
+    fake_crypto(monkeypatch)
+    repo = tmp_path / "repo"
+    ns = repo / "members" / "alice"
+    (ns / "memory").mkdir(parents=True)
+    r1, k1 = teamcrypto.keygen(tmp_path / "g1")
+    (ns / "memory" / "lint.md.age").write_bytes(teamcrypto.encrypt(r1, b"card"))
+    r2, k2 = teamcrypto.keygen(tmp_path / "g2")
+    team._reencrypt_namespace(repo, "alice", new_key=k2, prev_key=k1, new_recipient=r2)
+    assert teamcrypto.decrypt(k2, (ns / "memory" / "lint.md.age").read_bytes()) == b"card"

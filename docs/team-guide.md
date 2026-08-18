@@ -1,7 +1,8 @@
 # PlugAgent Team Mode — Guide
 
-Team mode lets a small group share **distilled wiki pages** through a private
-git repository, encrypted end-to-end. It is opt-in and sits on top of the
+Team mode lets a small group share **distilled wiki pages** — and, since v0.5,
+**individually promoted memory cards** — through a private git repository,
+encrypted end-to-end. It is opt-in and sits on top of the
 Phase 1 personal features — nothing about your personal vault changes when you
 join a team.
 
@@ -60,15 +61,18 @@ pa team join <url> --key <path-to-team.key> --as <member-name>
   `~/.plugagent/teams/<team>/team.key` with `0600` permissions.
 
 Sharing a page: `pa team share concepts/auth.md` (a path inside your vault
-`wiki/`). Only markdown wiki pages can be shared — never raw sessions, never
-memory cards. Distill also offers to share pages it just wrote.
+`wiki/`). `pa team share` takes markdown wiki pages only — never raw sessions,
+never memory cards. Distill also offers to share pages it just wrote. Memory
+cards have their own explicit, per-card command — see
+[Memory-card sharing](#memory-card-sharing-v05); raw sessions can never be
+shared at all.
 
 ## What is and isn't protected
 
 | | |
 |---|---|
 | Protected | Page **content** at rest on the host — ciphertext only. A repo leak reveals no page bodies. |
-| Exposed (documented) | **Metadata**: member names, page paths (a path *is* the page title — `concepts/auth.md.age` reveals that an auth doc exists), and commit times/frequency. Plaintext paths are the default; a team can opt into hiding them — see [Filename privacy](#filename-privacy-v04) — which still leaves member names, page counts, and commit times visible. |
+| Exposed (documented) | **Metadata**: member names, page paths (a path *is* the page title — `concepts/auth.md.age` reveals that an auth doc exists), the **names of promoted memory cards** (same reasoning — `lint-before-commit.md.age`), and commit times/frequency. Plaintext names are the default; a team can opt into hiding them — see [Filename privacy](#filename-privacy-v04) — which still leaves member names, page/card counts, and commit times visible. |
 | Unprotected by design | Your **local decrypted cache** at `~/.plugagent/teams/<team>/cache/`. The threat model is the hosting provider, not your own machine (which already holds your raw sessions). |
 
 ## Member departure & re-keying
@@ -188,6 +192,91 @@ still decrypt the path map), but the **hashed filenames stay stable** across a
 re-key. Filename privacy and re-key are mutually exclusive while either is
 mid-transition: finish one before starting the other (the CLI refuses with a
 one-line hint if you interleave them).
+
+## Memory-card sharing (v0.5)
+
+Personal memory cards — the one-fact cards behind `pa memory` — stay on your
+machine by default, and there is no bulk sync. A team can share **individual**
+cards, one deliberate promotion at a time:
+
+```
+pa team share-card <card-name> [--confirm-schema-bump] [--team <team-name>]
+```
+
+**Explicit, per card.** You name the card; nothing is promoted automatically,
+in bulk, or as a side effect of another command. Your agent will not pick a
+card for you either — it promotes only the card you name, after confirming it.
+
+**What is stripped, and why.** The promoted copy carries `name`,
+`description`, `type` and the card body — nothing else. Usage statistics
+(`uses`, `last_used`, `created`) are removed before the card is encrypted,
+because a per-card use counter with a date is a working-hours side channel:
+it would let teammates infer when you work and what you lean on. The strip is
+an **allowlist**, so any key you hand-added to a card (`author:`, `client:`)
+is dropped too.
+
+**Your original is untouched.** Promotion reads the personal card and writes a
+separate encrypted blob into your namespace in the repo. The card in your vault
+keeps its statistics and stays yours to edit or forget.
+
+**The first promotion asks for confirmation.** The first memory card on a team
+raises the repository's `schema_version` to 3, and teammates still running
+v0.4.0 will be locked out of the **whole** team layer until they upgrade (they
+fail closed rather than mis-filing cards into the wiki). Because that decision
+affects everyone, the first `share-card` refuses until you re-run it with
+`--confirm-schema-bump`. Later promotions need no confirmation. If two members
+race to promote the first card, the loser is told to simply re-run — no
+confirmation needed the second time.
+
+**Receiving.** Cards other members promoted arrive with the normal
+`pa team sync` and fold into your hot index (`memory/MEMORY.md`) under a
+`## Team cards (read-only)` heading, each line attributed
+`(team: <member>)`. `pa memory show <name>` prints a received card with a
+`(team: <member>, read-only)` header; if two members share the same card name,
+use `pa memory show <name> --from <member>`. Received cards are **read-only**:
+they are never bumped, never counted in your hot/cold totals, and never copied
+into your own vault — so you cannot accidentally re-promote a teammate's card
+under your name.
+
+**Your own card always wins.** If you have a personal card with the same name,
+yours is what `show` and `recall` return; the team line stays visible in the
+index but is marked `(shadowed by your card)`.
+
+**The off switch.** If you would rather not see them at all:
+
+```
+pa team memory off [--team <team-name>]      # `on` re-enables
+```
+
+This is **local only** — it is recorded in your machine's team config, never in
+the repo, so the team is not told who opted out. It takes effect immediately
+(the hot index is rebuilt on the spot), and it has no side door: team briefings
+and the team page index never surface memory cards either. Your own promoted
+cards are unaffected; turning received cards off is not a withdrawal.
+`pa team status` shows `team cards: N shared / M received` and appends
+`(team memory off)` when the switch is off.
+
+**Withdrawal is forward-only.**
+
+```
+pa team unshare-card <card-name> [--team <team-name>]
+```
+
+This removes the encrypted card from your namespace, so receivers drop it from
+their cache and hot index on their next sync. It does **not** revoke past
+access: the ciphertext stays in the git history, and anyone who already cloned
+the repository keeps it — the same honest limitation as re-keying. Withdrawal
+deliberately needs **no fnkey**, so a member who never accepted filename
+privacy can still take a card back.
+
+**Interaction with the other team features.** Memory cards live under
+`members/<you>/memory/` in the repo and are covered by everything the wiki
+layer already gets: they are encrypted with the team key, re-encrypted by
+`pa team rekey` / `rekey-accept`, and renamed to hashed `<32-hex>.age` names
+when filename privacy is on (with the real card name only inside the encrypted
+manifest). Sharing a card on a hashed team therefore needs the fnkey, exactly
+like sharing a page; withdrawing one does not. Raw sessions still never leave
+your machine, under any setting.
 
 ## Second-machine rejoin (deliberate namespace reuse)
 

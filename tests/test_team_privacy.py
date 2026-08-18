@@ -27,9 +27,15 @@ def test_schema_2_hashed_team_is_accepted(tmp_path):
 
 def test_future_schema_is_refused(tmp_path):
     repo = _repo_with_meta(tmp_path, {"name": "t", "recipient": "age1x",
-                                      "schema_version": 3})
+                                      "schema_version": 4})   # was 3; 3 is ours now
     with pytest.raises(team.TeamError):
         team._read_committed_meta(repo)
+
+
+def test_schema_3_memory_team_is_accepted(tmp_path):
+    repo = _repo_with_meta(tmp_path, {"name": "t", "recipient": "age1x",
+                                      "schema_version": 3, "privacy": "hashed"})
+    assert team._read_committed_meta(repo)["schema_version"] == 3
 
 
 def test_missing_schema_version_refused_cleanly_not_typeerror(tmp_path):

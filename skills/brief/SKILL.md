@@ -27,6 +27,11 @@ Mirror the user's language. Text-first (no charts in Phase 1).
    personal (default to personal on ambiguity). Brief does not run `pa team
    sync` (it stays side-effect-free) — team pages are served from whatever the
    last recall pulled; say "as of the last sync" when presenting them.
+7. When you walk the team cache, read shared WIKI pages only — that is
+   `members/<member>/wiki/` — and SKIP `members/<member>/memory/` entirely.
+   Received memory cards are not team activity, and a user who ran
+   `pa team memory off` must not see them resurface in a briefing. Team cards
+   reach the user through the memory hot index alone, never through brief.
 
 This skill is read-only: every step above only reads (`raw/sessions/` files,
 `wiki/log.md`, `pa status`). Nothing here writes to the vault.
